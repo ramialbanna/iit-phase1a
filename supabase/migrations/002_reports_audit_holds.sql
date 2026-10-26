@@ -65,14 +65,16 @@ CREATE TABLE iit.deal_report_requirements (    -- derived for the DRAFT, frozen 
 SELECT iit.attach_history('iit.deal_report_requirements', 'id', true);   -- recomputation on a draft removes/adds rows; every change recorded
 -- requirement rows may change only while their version is a DRAFT (Codex 002 finding 4); the composite FK gives ownership, this gives immutability
 CREATE FUNCTION iit.requirements_frozen_guard() RETURNS trigger LANGUAGE plpgsql SET search_path = '' AS $$
-DECLARE v_status text; r record;
+DECLARE v_status text;
 BEGIN
-  r := CASE TG_OP WHEN 'DELETE' THEN OLD ELSE NEW END;
-  SELECT status INTO v_status FROM iit.deal_versions WHERE deal_id = r.deal_id AND version_no = r.version_no;
-  IF v_status IS DISTINCT FROM 'draft' THEN RAISE EXCEPTION 'REQUIREMENTS_FROZEN: % on v% of deal % (%)', TG_OP, r.version_no, r.deal_id, coalesce(v_status, 'no version'); END IF;
-  IF TG_OP = 'UPDATE' AND (NEW.deal_id <> OLD.deal_id OR NEW.version_no <> OLD.version_no) THEN
+  -- the row's CURRENT parent (OLD) must be a draft for UPDATE/DELETE; the row's TARGET parent (NEW) must be a draft for INSERT/UPDATE
+  IF TG_OP IN ('UPDATE','DELETE') THEN
+    SELECT status INTO v_status FROM iit.deal_versions WHERE deal_id = OLD.deal_id AND version_no = OLD.version_no;
+    IF v_status IS DISTINCT FROM 'draft' THEN RAISE EXCEPTION 'REQUIREMENTS_FROZEN: % on v% of deal % (%)', TG_OP, OLD.version_no, OLD.deal_id, coalesce(v_status, 'no version'); END IF;
+  END IF;
+  IF TG_OP IN ('INSERT','UPDATE') THEN
     SELECT status INTO v_status FROM iit.deal_versions WHERE deal_id = NEW.deal_id AND version_no = NEW.version_no;
-    IF v_status IS DISTINCT FROM 'draft' THEN RAISE EXCEPTION 'REQUIREMENTS_FROZEN: cannot move a requirement onto a non-draft version'; END IF;
+    IF v_status IS DISTINCT FROM 'draft' THEN RAISE EXCEPTION 'REQUIREMENTS_FROZEN: % onto v% of deal % (%)', TG_OP, NEW.version_no, NEW.deal_id, coalesce(v_status, 'no version'); END IF;
   END IF;
   RETURN COALESCE(NEW, OLD);
 END $$;
@@ -140,7 +142,7 @@ CREATE TABLE iit.audit_decisions (             -- append-only (T49)
 );
 SELECT iit.make_append_only('iit.audit_decisions');
 
-ALTER TABLE iit.material_corrections ADD CONSTRAINT material_corrections_id_deal_draft_uq UNIQUE (id, deal_id, draft_version_no);
+ALTER TABLE iit.material_corrections ADD CONSTRAINT material_corrections_id_deal_uq UNIQUE (id, deal_id);
 ALTER TABLE iit.audit_decisions ADD CONSTRAINT audit_decisions_id_check_uq UNIQUE (id, check_id);
 CREATE TABLE iit.audit_holds (                 -- §5.7a DDL + released_at/by cache maintained only by record_decision
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -156,8 +158,14 @@ CREATE TABLE iit.audit_holds (                 -- §5.7a DDL + released_at/by ca
   CHECK (cause <> 'cutover_unresolved' OR reconciliation_item_id IS NOT NULL),
   CHECK ((released_at IS NULL) = (released_by_decision_id IS NULL)),
   CHECK (cause <> 'cancel' OR released_at IS NULL),                     -- G12: a cancel hold is never released
-  -- same-deal / same-version relationships (Codex 002 finding 5); NULLs (unbound holds) are allowed by MATCH SIMPLE
-  CONSTRAINT audit_holds_correction_same_deal_fk FOREIGN KEY (correction_id, deal_id, covers_version_no) REFERENCES iit.material_corrections(id, deal_id, draft_version_no),
+  -- Relationships (Codex 002 findings 5 / rev-2):
+  --  * correction ownership is same-deal only; covers_version_no is deliberately NOT tied to material_corrections.draft_version_no,
+  --    because the accepted design lets a hold be REBOUND to a newer version after proof (§5.7a). The INITIAL covering version is
+  --    validated by open_hold() (= the correction's draft version); later changes go through the reviewed rebind path (003).
+  --  * a bound check must be of the same deal AND the same version as covers_version_no; a check can never be bound without a version.
+  --  * a release must cite a decision on exactly the covering check (FK) that is 'approved' (trigger, INSERT and UPDATE).
+  CHECK (covering_check_id IS NULL OR covers_version_no IS NOT NULL),
+  CONSTRAINT audit_holds_correction_same_deal_fk FOREIGN KEY (correction_id, deal_id) REFERENCES iit.material_corrections(id, deal_id),
   CONSTRAINT audit_holds_check_same_deal_fk FOREIGN KEY (covering_check_id, deal_id, covers_version_no) REFERENCES iit.prequalification_checks(id, deal_id, deal_version_no),
   CONSTRAINT audit_holds_release_on_covering_check_fk FOREIGN KEY (released_by_decision_id, covering_check_id) REFERENCES iit.audit_decisions(id, check_id)
 );
@@ -175,11 +183,15 @@ SELECT iit.make_append_only('iit.audit_hold_events');
 -- released_at may only move NULL → value, exactly once
 CREATE FUNCTION iit.audit_holds_guard() RETURNS trigger LANGUAGE plpgsql SET search_path = '' AS $$
 BEGIN
+  IF TG_OP = 'INSERT' THEN
+    -- a hold is never born released: releases happen only through record_decision on the covering check
+    IF NEW.released_at IS NOT NULL OR NEW.released_by_decision_id IS NOT NULL THEN RAISE EXCEPTION 'HOLD_INSERT_RELEASED: holds cannot be inserted already released'; END IF;
+    RETURN NEW;
+  END IF;
   IF OLD.released_at IS NOT NULL AND (NEW.released_at IS DISTINCT FROM OLD.released_at OR NEW.released_by_decision_id IS DISTINCT FROM OLD.released_by_decision_id) THEN
     RAISE EXCEPTION 'HOLD_RELEASE_IMMUTABLE: hold % was already released', OLD.id; END IF;
   IF NEW.deal_id <> OLD.deal_id OR NEW.cause <> OLD.cause OR NEW.correction_id IS DISTINCT FROM OLD.correction_id OR NEW.opened_at <> OLD.opened_at OR NEW.opened_by <> OLD.opened_by THEN
     RAISE EXCEPTION 'HOLD_IMMUTABLE: identity fields of hold % cannot change', OLD.id; END IF;
-  -- a release must cite an APPROVED decision on exactly the covering check (the FK guarantees the check; this guarantees the value)
   IF NEW.released_by_decision_id IS NOT NULL AND OLD.released_by_decision_id IS NULL THEN
     IF NEW.covering_check_id IS NULL THEN RAISE EXCEPTION 'HOLD_RELEASE_UNBOUND: hold % has no covering check', OLD.id; END IF;
     IF NOT EXISTS (SELECT 1 FROM iit.audit_decisions d WHERE d.id = NEW.released_by_decision_id AND d.check_id = NEW.covering_check_id AND d.decision = 'approved') THEN
@@ -187,7 +199,7 @@ BEGIN
   END IF;
   RETURN NEW;
 END $$;
-CREATE TRIGGER audit_holds_guard BEFORE UPDATE ON iit.audit_holds FOR EACH ROW EXECUTE FUNCTION iit.audit_holds_guard();
+CREATE TRIGGER audit_holds_guard BEFORE INSERT OR UPDATE ON iit.audit_holds FOR EACH ROW EXECUTE FUNCTION iit.audit_holds_guard();
 
 -- ---------------------------------------------------------------------------------------------------------------------
 -- 3. pure helpers (no actor): versions, requirements, satisfaction, eligibility
@@ -300,6 +312,9 @@ DECLARE v_hold uuid;
 BEGIN
   PERFORM 1 FROM iit.deals WHERE id = p_deal FOR UPDATE;
   IF NOT FOUND THEN RAISE EXCEPTION 'DEAL_UNKNOWN: %', p_deal; END IF;
+  -- initial covering version of a material-correction hold = the correction's draft version (rebinding later changes it with proof)
+  IF p_cause = 'material_correction' AND NOT EXISTS (SELECT 1 FROM iit.material_corrections m WHERE m.id = p_correction AND m.deal_id = p_deal AND m.draft_version_no = p_covers_version) THEN
+    RAISE EXCEPTION 'HOLD_COVERS_MISMATCH: correction % of deal % is not for draft v%', p_correction, p_deal, p_covers_version; END IF;
   INSERT INTO iit.audit_holds(deal_id, cause, correction_id, covers_version_no, reconciliation_item_id, opened_by)
     VALUES (p_deal, p_cause, p_correction, p_covers_version, p_reconciliation_item, p_actor) RETURNING id INTO v_hold;
   UPDATE iit.deals SET on_hold = true, gate_clear = false WHERE id = p_deal;      -- caches

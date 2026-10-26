@@ -98,6 +98,8 @@ DO $$ DECLARE chk1 uuid; chk2 uuid; h1 uuid; h2 uuid; dec uuid; BEGIN
   -- open material draft blocks a decision
   INSERT INTO iit.deal_versions(deal_id, version_no, status, cause) VALUES ('00000000-0000-4000-8000-0000000000e3', 2, 'draft', 'material_correction');
   BEGIN PERFORM iit.record_decision(chk1,'approved',NULL,'b44-aud'); RAISE EXCEPTION 'R4e decision with open material draft accepted'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'DECISION_REJECTED%' THEN RAISE; END IF; END;
+  -- rev-3 finding 1: moving a requirement row from released v1 onto draft v2 must be rejected (OLD parent frozen)
+  BEGIN UPDATE iit.deal_report_requirements SET version_no = 2 WHERE deal_id='00000000-0000-4000-8000-0000000000e3' AND version_no=1 AND report_type='FL_DMV'; RAISE EXCEPTION 'R1g released->draft move accepted'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'REQUIREMENTS_FROZEN%' THEN RAISE; END IF; END;
   -- release v2 (and supersede v1): chk1 is now for a stale version
   UPDATE iit.deal_versions SET status='released', released_at=now(), released_by='00000000-0000-4000-8000-00000000000d', snapshot='{}', history_watermark=2 WHERE deal_id='00000000-0000-4000-8000-0000000000e3' AND version_no=2;
   UPDATE iit.deal_versions SET status='superseded' WHERE deal_id='00000000-0000-4000-8000-0000000000e3' AND version_no=1;
@@ -121,7 +123,22 @@ DO $$ DECLARE chk1 uuid; chk2 uuid; h1 uuid; h2 uuid; dec uuid; BEGIN
   IF NOT iit.approval_eligible('00000000-0000-4000-8000-0000000000e3') THEN RAISE EXCEPTION 'R4k5 not eligible after approving the current attempt'; END IF;
   -- finding 5: cross-deal correction, cross-deal check, release with a decision from another check / a non-approved decision
   INSERT INTO iit.material_corrections(id, deal_id, from_version_no, draft_version_no, fields, history_ids, by) VALUES ('00000000-0000-4000-8000-0000000000cd','00000000-0000-4000-8000-0000000000e2',1,2,'{vin}','{1}','00000000-0000-4000-8000-00000000000d');
-  BEGIN PERFORM iit.open_hold('00000000-0000-4000-8000-0000000000e3','material_correction','00000000-0000-4000-8000-00000000000d','00000000-0000-4000-8000-0000000000cd',2); RAISE EXCEPTION 'R5x-a hold referenced another deal''s correction'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
+  -- rev-3: a bound check with NULL covering version cannot bypass the composite FK
+  BEGIN UPDATE iit.audit_holds SET covering_check_id = chk2, covers_version_no = NULL WHERE id = h2; RAISE EXCEPTION 'R5y-a NULL covering version bypass'; EXCEPTION WHEN check_violation THEN NULL; END;
+  -- rev-3: an already-released hold cannot be inserted (even citing a real approved decision)
+  BEGIN INSERT INTO iit.audit_holds(deal_id, cause, covers_version_no, covering_check_id, opened_by, released_at, released_by_decision_id) VALUES ('00000000-0000-4000-8000-0000000000e3','reaudit_request',2,chk2,'00000000-0000-4000-8000-00000000000d',now(),dec); RAISE EXCEPTION 'R5y-b released hold inserted'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'HOLD_INSERT_RELEASED%' THEN RAISE; END IF; END;
+  -- rev-3: initial covering version must equal the correction's draft version (same deal, wrong version)
+  INSERT INTO iit.material_corrections(id, deal_id, from_version_no, draft_version_no, fields, history_ids, by) VALUES ('00000000-0000-4000-8000-0000000000ce','00000000-0000-4000-8000-0000000000e3',2,3,'{vin}','{1}','00000000-0000-4000-8000-00000000000d');
+  BEGIN PERFORM iit.open_hold('00000000-0000-4000-8000-0000000000e3','material_correction','00000000-0000-4000-8000-00000000000d','00000000-0000-4000-8000-0000000000ce',2); RAISE EXCEPTION 'R5y-c wrong initial covering version accepted'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'HOLD_COVERS_MISMATCH%' THEN RAISE; END IF; END;
+  -- rebinding-compatible: a direct covers_version_no change on an unbound material hold is NOT blocked by the FK (reviewed rebind path in 003 will own it)
+  INSERT INTO iit.deal_versions(deal_id, version_no, status, cause) VALUES ('00000000-0000-4000-8000-0000000000e3', 3, 'draft', 'material_correction');
+  h1 := iit.open_hold('00000000-0000-4000-8000-0000000000e3','material_correction','00000000-0000-4000-8000-00000000000d','00000000-0000-4000-8000-0000000000ce',3);
+  UPDATE iit.audit_holds SET covers_version_no = 4 WHERE id = h1;   -- permitted at the constraint level (unbound); 003 governs it
+  UPDATE iit.audit_holds SET covers_version_no = 3 WHERE id = h1;
+  UPDATE iit.deal_versions SET status='released', released_at=now(), released_by='00000000-0000-4000-8000-00000000000d', snapshot='{}', history_watermark=3 WHERE deal_id='00000000-0000-4000-8000-0000000000e3' AND version_no=3;
+  UPDATE iit.deal_versions SET status='superseded' WHERE deal_id='00000000-0000-4000-8000-0000000000e3' AND version_no=2;
+  BEGIN PERFORM iit.open_hold('00000000-0000-4000-8000-0000000000e3','material_correction','00000000-0000-4000-8000-00000000000d','00000000-0000-4000-8000-0000000000cd',2); RAISE EXCEPTION 'R5x-a hold referenced another deal''s correction (function)'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'HOLD_COVERS_MISMATCH%' THEN RAISE; END IF; END;
+  BEGIN INSERT INTO iit.audit_holds(deal_id, cause, correction_id, covers_version_no, opened_by) VALUES ('00000000-0000-4000-8000-0000000000e3','material_correction','00000000-0000-4000-8000-0000000000cd',2,'00000000-0000-4000-8000-00000000000d'); RAISE EXCEPTION 'R5x-a2 hold referenced another deal''s correction (direct insert)'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
   -- a check for v1 cannot cover a hold declared for v2 (version mismatch), and a check of another deal cannot cover at all
   BEGIN UPDATE iit.audit_holds SET covering_check_id = chk1, covers_version_no = 2 WHERE id = h2; RAISE EXCEPTION 'R5x-b hold bound to a check of a different version'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
   INSERT INTO iit.deal_versions(deal_id, version_no, status, cause) VALUES ('00000000-0000-4000-8000-0000000000e1', 1, 'draft', 'intake') ON CONFLICT DO NOTHING;
