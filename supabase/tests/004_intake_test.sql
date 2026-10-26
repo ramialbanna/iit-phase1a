@@ -48,6 +48,9 @@ DO $$ DECLARE d1 uuid; d2 uuid; p uuid; v int; msg text; BEGIN
   p := iit.set_seller_party(d1,'owner',1,'{"party_type":"person","first_name":"Cora","last_name":"Consignor","phone":"(555) 010-0010"}','b44-de');
   IF (SELECT phone_normalized FROM iit.seller_parties WHERE id = p) <> '5550100010' THEN RAISE EXCEPTION 'X3i party'; END IF;
   IF iit.set_seller_party(d1,'owner',1,'{"party_type":"person","last_name":"Consignor-Smith"}','b44-de') <> p THEN RAISE EXCEPTION 'X3j replace kept the same party row'; END IF;
+  -- finding 1: a business party is created with its organization in the same insert (001 CHECK); without it the CHECK refuses
+  IF (SELECT business_org_id FROM iit.seller_parties WHERE id = iit.set_seller_party(d2,'business_seller',1,'{"party_type":"business","business_org_id":"00000000-0000-4000-8000-00000000000f","phone":"555-2"}','b44-de')) <> '00000000-0000-4000-8000-00000000000f' THEN RAISE EXCEPTION 'X3j2 business seller'; END IF;
+  BEGIN PERFORM iit.set_seller_party(d2,'business_seller',2,'{"party_type":"business"}','b44-de'); RAISE EXCEPTION 'X3j3 business without org'; EXCEPTION WHEN check_violation THEN NULL; END;
   BEGIN PERFORM iit.release_deal(d1,'b44-de'); RAISE EXCEPTION 'X3k'; EXCEPTION WHEN OTHERS THEN msg := SQLERRM; IF msg <> 'RELEASE_REFUSED: missing required facts: consignor' THEN RAISE EXCEPTION 'X3k: %', msg; END IF; END;
   INSERT INTO iit.consignments(deal_id, consignor_party_id, consignment_amount) VALUES (d1, p, 9000);   -- D-30: no consignment function yet
   v := iit.release_deal(d1,'b44-de'); IF v <> 1 THEN RAISE EXCEPTION 'X3l'; END IF;
@@ -105,6 +108,10 @@ DO $$ DECLARE r jsonb; r2 jsonb; deal uuid; deal2 uuid; item uuid; ref uuid; n i
   BEGIN PERFORM iit.resolve_work_item(item, 'x', 'b44-de'); RAISE EXCEPTION 'X4t generic close of a restart task'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'WORK_ITEM_KIND_DEFERRED%' THEN RAISE; END IF; END;
   BEGIN PERFORM iit.resolve_restart(item, 'no_restart', '', 'b44-de'); RAISE EXCEPTION 'X4u no reason'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'REASON_REQUIRED%' THEN RAISE; END IF; END;
   BEGIN PERFORM iit.resolve_restart(item, 'restart_new_episode', 'x', 'b44-aud'); RAISE EXCEPTION 'X4v auditor restarted'; EXCEPTION WHEN SQLSTATE '42501' THEN NULL; END;
+  -- finding 3: a NULL decision is refused before any write; task, episodes and Deals unchanged
+  SELECT count(*) INTO n FROM iit.deals;
+  BEGIN PERFORM iit.resolve_restart(item, NULL, 'x', 'b44-de'); RAISE EXCEPTION 'X4v2 NULL decision accepted'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'RESTART_DECISION: NULL%' THEN RAISE; END IF; END;
+  IF (SELECT status FROM iit.work_items WHERE id = item) <> 'open' OR (SELECT count(*) FROM iit.deals) <> n OR (SELECT count(*) FROM iit.appraisal_episodes e JOIN iit.external_references x ON x.id = e.appraisal_ref_id WHERE x.external_id='APPR-100') <> 1 THEN RAISE EXCEPTION 'X4v3 NULL decision wrote something'; END IF;
   deal2 := iit.resolve_restart(item, 'restart_new_episode', 'customer came back', 'b44-de');
   IF deal2 IS NULL OR (SELECT restarted_from_deal_id FROM iit.deals WHERE id = deal2) <> deal OR (SELECT purchase_price FROM iit.deals WHERE id = deal2) <> 15100 THEN RAISE EXCEPTION 'X4w restart deal'; END IF;
   IF (SELECT episode_no || '/' || start_basis || '/' || started_by::text FROM iit.appraisal_episodes WHERE deal_id = deal2) <> '2/data_entry_restart/00000000-0000-4000-8000-00000000000d' THEN RAISE EXCEPTION 'X4x episode 2'; END IF;
@@ -141,6 +148,45 @@ DO $$ DECLARE p uuid; corr uuid; no int; holds int; ids bigint[]; BEGIN
   IF (SELECT phone_normalized FROM iit.seller_parties WHERE id = p) <> '5550109999' OR (SELECT field FROM iit.deal_amendments WHERE deal_id='00000000-0000-4000-8000-0000000000e5' AND amendment_no = no AND version_no = iit.latest_released_version('00000000-0000-4000-8000-0000000000e5')) <> 'party:owner:' || p::text THEN RAISE EXCEPTION 'X5h amendment'; END IF;
   IF (SELECT count(*) FROM iit.audit_holds WHERE deal_id='00000000-0000-4000-8000-0000000000e5' AND released_at IS NULL) <> holds + 2 THEN RAISE EXCEPTION 'X5i amendment opened a hold'; END IF;
   BEGIN PERFORM iit.amend_party('00000000-0000-4000-8000-0000000000e5', p, '{"phone":"(555) 010-9999"}','same','b44-de'); RAISE EXCEPTION 'X5j no-change'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'NO_CHANGE%' THEN RAISE; END IF; END;
+END $$;
+
+-- X5b finding 4: a hold opened by ADDING a party is rebound with the proof after the next supersession (new nested party snapshot)
+DO $$ DECLARE r jsonb; deal uuid; v int; c1 uuid; corr uuid; hp uuid; corr2 uuid; dec uuid; ids bigint[]; BEGIN
+  r := iit.ingest_vauto_observation('APPR-300','', '{"vehicle":{"vin":"WAUZZZ8V7JA000300"},"appraisal":{"value":8000,"is_completed":true},"personnel":{"buyer":"rami.b"},
+     "customer":{"first_name":"Bo","last_name":"Owner","phone":"555-010-0300"},"title":{"region":"TX"},"timestamps":{"created":"2026-10-20T10:00:00Z"}}');
+  deal := (r ->> 'deal_id')::uuid;
+  PERFORM iit.set_source_channel(deal, 'TEST vAuto Retail', 'b44-de');
+  PERFORM iit.set_deal_fact(deal, 'deposit_amount', '0', 'b44-de'); PERFORM iit.set_deal_fact(deal, 'custody', '"in_hand"', 'b44-de');
+  PERFORM iit.set_deal_fact(deal, 'lien_position', '"none"', 'b44-de'); PERFORM iit.set_deal_fact(deal, 'closer_id', '"00000000-0000-4000-8000-00000000000d"', 'b44-de');
+  v := iit.release_deal(deal, 'b44-de'); IF v <> 1 THEN RAISE EXCEPTION 'X5b-a'; END IF;
+  dec := iit.record_decision(iit.current_attempt(deal), 'approved', 'ok', 'b44-aud');
+  -- add a BUSINESS co-seller after release through correct_party (finding 1, second path) → draft v2 + hold HP
+  corr := iit.correct_party(deal, 'business_seller', 1, '{"party_type":"business","business_org_id":"00000000-0000-4000-8000-00000000000f","phone":"555-3"}', 'co-seller on title', 'b44-de');
+  SELECT id INTO hp FROM iit.audit_holds WHERE correction_id = corr;
+  SELECT history_ids INTO ids FROM iit.material_corrections WHERE id = corr;
+  IF (SELECT string_agg(table_name || ':' || op, ',' ORDER BY id) FROM iit.record_history WHERE id = ANY (ids)) <> 'seller_parties:I,deal_parties:I' THEN RAISE EXCEPTION 'X5b-b one insert per row expected'; END IF;
+  -- the business seller adds the OPENCORPORATES requirement on the draft; waive it so v2 can release (audit_lead)
+  PERFORM iit.waive_report(deal, 'OPENCORPORATES:00000000-0000-4000-8000-00000000000f', 'verified by phone', 'b44-lead');
+  v := iit.release_deal(deal, 'b44-de'); IF v <> 2 THEN RAISE EXCEPTION 'X5b-c'; END IF;
+  -- v2's snapshot carries the party in the nested shape with every inserted column
+  IF (SELECT count(*) FROM iit.deal_versions dv, jsonb_array_elements(dv.snapshot -> 'parties') e WHERE dv.deal_id = deal AND dv.version_no = 2 AND e -> 'party' ->> 'business_org_id' = '00000000-0000-4000-8000-00000000000f' AND (e -> 'party') ? 'created_at' AND e -> 'link' ->> 'deal_id' = deal::text) <> 1 THEN RAISE EXCEPTION 'X5b-d nested party snapshot'; END IF;
+  -- not approved; a different material change supersedes v2 → HP's covering version is superseded
+  corr2 := iit.correct_field(deal, 'purchase_price', '8100', 'invoice', 'b44-de');
+  PERFORM iit.waive_report(deal, 'OPENCORPORATES:00000000-0000-4000-8000-00000000000f', 'still verified', 'b44-lead');   -- waivers never carry over
+  v := iit.release_deal(deal, 'b44-de'); IF v <> 3 THEN RAISE EXCEPTION 'X5b-e'; END IF;
+  IF iit.snapshot_contains_changes(deal, 3, ids) IS NOT NULL THEN RAISE EXCEPTION 'X5b-f proof failed: %', iit.snapshot_contains_changes(deal, 3, ids); END IF;
+  v := iit.rebind_hold(hp, 'party still on v3', 'b44-lead');
+  IF v <> 3 OR (SELECT covers_version_no FROM iit.audit_holds WHERE id = hp) <> 3 OR (SELECT covering_check_id FROM iit.audit_holds WHERE id = hp) <> iit.current_attempt(deal) THEN RAISE EXCEPTION 'X5b-g rebind'; END IF;
+  dec := iit.record_decision(iit.current_attempt(deal), 'approved', 'ok', 'b44-aud');
+  IF iit.deal_has_open_hold(deal) THEN RAISE EXCEPTION 'X5b-h holds still open after approval of the rebound attempt'; END IF;
+  -- a party row changed AFTER the correction (contact amendment) is still provable only for the correction's own history rows:
+  -- the proof concerns those rows, not later edits (they are administrative and never in history_ids)
+END $$;
+
+-- fixture for 004_concurrency_test.sh (CONC-3): an open vAuto Deal whose cancellation will race an ingest
+DO $$ DECLARE r jsonb; BEGIN
+  r := iit.ingest_vauto_observation('APPR-200','', '{"vehicle":{"vin":"WAUZZZ8V7JA000200"},"appraisal":{"value":5000,"is_completed":true},"customer":{"last_name":"Race","phone":"555-010-0200"},"timestamps":{"created":"2026-10-20T10:00:00Z"}}');
+  IF r ->> 'action' <> 'created' THEN RAISE EXCEPTION 'CONC-3 fixture: %', r; END IF;
 END $$;
 
 -- X6 grants and coverage

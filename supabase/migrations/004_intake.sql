@@ -15,6 +15,84 @@ SET search_path = pg_catalog;
 -- ---------------------------------------------------------------------------------------------------------------------
 INSERT INTO iit.users(id, display_name, email, kind) VALUES ('00000000-0000-4000-8000-00000000f00d', 'TAV Intake Worker', NULL, 'service');
 CREATE FUNCTION iit.worker_user() RETURNS uuid LANGUAGE sql IMMUTABLE SET search_path = '' AS $$ SELECT '00000000-0000-4000-8000-00000000f00d'::uuid $$;
+-- Snapshot parties are now {link:{…deal_parties columns…}, party:{…seller_parties columns…}} so that EVERY column of an inserted
+-- party row (a new party after release) maps 1:1 onto the snapshot and the rebind proof can compare it (Codex 004 rev-1 finding 4).
+-- D-18 revised: the raw phone, user_id and created_at are included because the table columns are allowlisted (§7) and an INSERT
+-- row carries them. Snapshots released BEFORE 004 keep the flat shape; party rows cannot be proven against them (fail closed).
+UPDATE iit.json_schemas SET schema = schema - 'parties' || '{"parties": {
+  "link":  {"id":true,"deal_id":true,"party_id":true,"role":true,"ordinal":true},
+  "party": {"id":true,"party_type":true,"first_name":true,"last_name":true,"business_org_id":true,"phone":true,"phone_normalized":true,
+            "email":true,"city":true,"state":true,"user_id":true,"created_at":true}}}'::jsonb,
+  updated_at = now(), note = note || '; 004: parties nested link/party (full columns, rebind proof)'
+WHERE name = 'deal_version_snapshot';
+CREATE OR REPLACE FUNCTION iit.build_deal_snapshot(p_deal uuid, p_version int) RETURNS jsonb LANGUAGE sql STABLE SET search_path = '' AS $$
+  SELECT pg_catalog.jsonb_strip_nulls(pg_catalog.jsonb_build_object(
+    'deal', (SELECT pg_catalog.jsonb_build_object('id', d.id, 'deal_number', d.deal_number, 'origin', d.origin, 'source_channel_id', d.source_channel_id,
+               'consumer_route', d.consumer_route, 'purchase_price', d.purchase_price, 'deposit_amount', d.deposit_amount, 'balance', d.balance,
+               'balance_owed', d.balance_owed, 'buyer_id', d.buyer_id, 'closer_id', d.closer_id, 'dealer_sold_to', d.dealer_sold_to,
+               'dealer_auction_name', d.dealer_auction_name, 'consignment_id', d.consignment_id, 'restarted_from_deal_id', d.restarted_from_deal_id)
+             FROM iit.deals d WHERE d.id = p_deal),
+    'vehicle', (SELECT pg_catalog.jsonb_build_object('id', v.id, 'vin', v.vin, 'vin_normalized', v.vin_normalized, 'year', v.year, 'make_text', v.make_text,
+                  'model_text', v.model_text, 'series', v.series, 'exterior_color', v.exterior_color)
+                FROM iit.deals d JOIN iit.vehicles v ON v.id = d.vehicle_id WHERE d.id = p_deal),
+    'title', (SELECT pg_catalog.jsonb_build_object('id', t.id, 'deal_id', t.deal_id, 'custody', t.custody, 'title_state', t.title_state, 'title_number', t.title_number,
+                'title_miles', t.title_miles, 'brand', t.brand, 'is_tribal', t.is_tribal) FROM iit.deal_titles t WHERE t.deal_id = p_deal),
+    'lien', (SELECT pg_catalog.jsonb_build_object('id', l.id, 'deal_id', l.deal_id, 'position', l.position, 'lienholder_org_id', l.lienholder_org_id, 'lienholder_name_raw', l.lienholder_name_raw,
+               'lienholder_phone', l.lienholder_phone, 'payoff_amount', l.payoff_amount, 'payoff_good_through', l.payoff_good_through, 'per_diem', l.per_diem)
+             FROM iit.deal_liens l WHERE l.deal_id = p_deal),
+    'parties', coalesce((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
+                 'link',  pg_catalog.jsonb_build_object('id', dp.id, 'deal_id', dp.deal_id, 'party_id', dp.party_id, 'role', dp.role, 'ordinal', dp.ordinal),
+                 'party', pg_catalog.jsonb_build_object('id', sp.id, 'party_type', sp.party_type, 'first_name', sp.first_name, 'last_name', sp.last_name,
+                            'business_org_id', sp.business_org_id, 'phone', sp.phone, 'phone_normalized', sp.phone_normalized, 'email', sp.email,
+                            'city', sp.city, 'state', sp.state, 'user_id', sp.user_id, 'created_at', sp.created_at)) ORDER BY dp.role, dp.ordinal)
+               FROM iit.deal_parties dp JOIN iit.seller_parties sp ON sp.id = dp.party_id WHERE dp.deal_id = p_deal), '[]'::jsonb),
+    'consignment', (SELECT pg_catalog.jsonb_build_object('id', c.id, 'consignor_party_id', c.consignor_party_id, 'consignment_amount', c.consignment_amount)
+                    FROM iit.consignments c WHERE c.deal_id = p_deal),
+    'requirements', coalesce((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object('requirement_key', q.requirement_key, 'report_type', q.report_type,
+                       'subject_type', q.subject_type, 'subject_vin', q.subject_vin, 'subject_org_id', q.subject_org_id) ORDER BY q.requirement_key)
+                     FROM iit.deal_report_requirements q WHERE q.deal_id = p_deal AND q.version_no = p_version), '[]'::jsonb)
+  )) $$;
+CREATE OR REPLACE FUNCTION iit.snapshot_contains_changes(p_deal uuid, p_version int, p_history_ids bigint[]) RETURNS text LANGUAGE plpgsql STABLE SET search_path = '' AS $$
+DECLARE v_snap jsonb; v_wm bigint; h record; v_section jsonb; v_allowed jsonb; v_schema jsonb; k text; v_after jsonb; v_changed text[]; v_found int; v_section_name text;
+BEGIN
+  SELECT snapshot, history_watermark INTO v_snap, v_wm FROM iit.deal_versions WHERE deal_id = p_deal AND version_no = p_version AND status = 'released';
+  IF v_snap IS NULL THEN RETURN 'target version is not released'; END IF;
+  IF v_wm IS NULL THEN RETURN pg_catalog.format('v%s has no history watermark', p_version); END IF;
+  IF p_history_ids IS NULL OR pg_catalog.cardinality(p_history_ids) = 0 THEN RETURN 'correction lists no history rows'; END IF;
+  IF pg_catalog.array_position(p_history_ids, NULL) IS NOT NULL THEN RETURN 'correction lists a NULL history id'; END IF;
+  SELECT count(*) INTO v_found FROM iit.record_history WHERE id = ANY (p_history_ids);
+  IF v_found <> (SELECT count(DISTINCT x) FROM pg_catalog.unnest(p_history_ids) x) THEN RETURN pg_catalog.format('%s of %s listed history ids exist', v_found, pg_catalog.cardinality(p_history_ids)); END IF;
+  SELECT schema INTO v_schema FROM iit.json_schemas WHERE name = 'deal_version_snapshot';
+  FOR h IN SELECT * FROM iit.record_history WHERE id = ANY (p_history_ids) ORDER BY id LOOP
+    IF h.id > v_wm THEN RETURN pg_catalog.format('history %s is after the watermark %s of v%s', h.id, v_wm, p_version); END IF;
+    IF h.op = 'D' THEN RETURN pg_catalog.format('history %s is a delete', h.id); END IF;
+    v_section_name := CASE h.table_name WHEN 'deals' THEN 'deal' WHEN 'vehicles' THEN 'vehicle' WHEN 'deal_titles' THEN 'title' WHEN 'deal_liens' THEN 'lien'
+                                        WHEN 'deal_parties' THEN 'parties' WHEN 'seller_parties' THEN 'parties' END;
+    v_allowed := CASE h.table_name WHEN 'deal_parties' THEN v_schema -> 'parties' -> 'link' WHEN 'seller_parties' THEN v_schema -> 'parties' -> 'party' ELSE v_schema -> v_section_name END;
+    v_section := CASE h.table_name
+      WHEN 'deals'        THEN v_snap -> 'deal'
+      WHEN 'vehicles'     THEN v_snap -> 'vehicle'
+      WHEN 'deal_titles'  THEN v_snap -> 'title'
+      WHEN 'deal_liens'   THEN v_snap -> 'lien'
+      WHEN 'deal_parties'   THEN (SELECT e -> 'link'  FROM pg_catalog.jsonb_array_elements(v_snap -> 'parties') e WHERE e -> 'link'  ->> 'id' = h.record_id::text)
+      WHEN 'seller_parties' THEN (SELECT e -> 'party' FROM pg_catalog.jsonb_array_elements(v_snap -> 'parties') e WHERE e -> 'party' ->> 'id' = h.record_id::text)
+      ELSE NULL END;
+    IF v_section IS NULL THEN RETURN pg_catalog.format('history %s (%s %s) has no section in the v%s snapshot', h.id, h.table_name, h.record_key, p_version); END IF;
+    IF v_section ->> 'id' IS DISTINCT FROM h.record_id::text THEN
+      RETURN pg_catalog.format('history %s is for %s %s, snapshot v%s holds %s', h.id, h.table_name, h.record_key, p_version, v_section ->> 'id'); END IF;
+    -- changed columns: every key of `after` whose value differs from `before` (all keys on an INSERT)
+    SELECT pg_catalog.array_agg(a.key) INTO v_changed FROM pg_catalog.jsonb_each(h.after) a
+     WHERE h.before IS NULL OR (h.before -> a.key) IS DISTINCT FROM a.value;
+    FOREACH k IN ARRAY coalesce(v_changed, '{}'::text[]) LOOP
+      v_after := h.after -> k;
+      IF v_allowed IS NULL OR NOT (v_allowed ? k) THEN
+        RETURN pg_catalog.format('history %s: column %s.%s is not in the snapshot allowlist', h.id, h.table_name, k); END IF;
+      IF coalesce(v_section -> k, 'null'::jsonb) IS DISTINCT FROM v_after THEN
+        RETURN pg_catalog.format('history %s: %s.%s = %s in the change, %s in snapshot v%s', h.id, h.table_name, k, v_after, coalesce(v_section -> k, 'null'::jsonb), p_version); END IF;
+    END LOOP;
+  END LOOP;
+  RETURN NULL;
+END $$;
 UPDATE iit.json_schemas SET schema = schema || '{"deal_id":true,"episode_no":true,"observation_id":true,"party_role":true,"party_id":true,"restarted_from_deal_id":true,"origin":true}'::jsonb,
   updated_at = now(), note = note || '; 004: deal_id, episode_no, observation_id, party_role, party_id, restarted_from_deal_id, origin'
 WHERE name = 'activity_event_detail';
@@ -230,6 +308,17 @@ BEGIN
     ELSE RAISE EXCEPTION 'PARTY_PATCH: key % is not allowed (no street address — D14)', k; END IF;
   END LOOP;
 END $$;
+-- creates a seller_parties row from a validated patch in ONE insert (001's CHECK requires business_org_id with party_type
+-- 'business' at insert time — Codex 004 rev-1 finding 1)
+CREATE FUNCTION iit._insert_party(p_party jsonb) RETURNS uuid LANGUAGE plpgsql SET search_path = '' AS $$
+DECLARE v_id uuid;
+BEGIN
+  IF NOT (p_party ? 'party_type') THEN RAISE EXCEPTION 'PARTY_PATCH: party_type is required for a new party'; END IF;
+  INSERT INTO iit.seller_parties(party_type, first_name, last_name, business_org_id, phone, email, city, state)
+    VALUES (p_party ->> 'party_type', p_party ->> 'first_name', p_party ->> 'last_name', (p_party ->> 'business_org_id')::uuid,
+            p_party ->> 'phone', p_party ->> 'email', p_party ->> 'city', p_party ->> 'state') RETURNING id INTO v_id;
+  RETURN v_id;
+END $$;
 -- applies a patch to a seller_parties row (keys already validated); returns the row id
 CREATE FUNCTION iit._apply_party_patch(p_party_id uuid, p_party jsonb) RETURNS uuid LANGUAGE plpgsql SET search_path = '' AS $$
 BEGIN
@@ -259,11 +348,9 @@ BEGIN
   IF iit.latest_released_version(p_deal) IS NOT NULL THEN PERFORM iit.actor_restore(v_prev); RAISE EXCEPTION 'RELEASED_USE_CORRECTIONS: deal % is released; use correct_party / amend_party', p_deal; END IF;
   BEGIN
     SELECT * INTO k FROM iit._party_patch_check(p_party);
-    IF NOT (p_party ? 'party_type') THEN RAISE EXCEPTION 'PARTY_PATCH: party_type is required'; END IF;
     SELECT party_id INTO v_party FROM iit.deal_parties WHERE deal_id = p_deal AND role = p_role AND ordinal = coalesce(p_ordinal, 1);
     IF v_party IS NULL THEN
-      INSERT INTO iit.seller_parties(party_type) VALUES (p_party ->> 'party_type') RETURNING id INTO v_party;
-      PERFORM iit._apply_party_patch(v_party, p_party);
+      v_party := iit._insert_party(p_party);
       INSERT INTO iit.deal_parties(deal_id, party_id, role, ordinal) VALUES (p_deal, v_party, p_role, coalesce(p_ordinal, 1)) RETURNING id INTO v_link;
     ELSE
       PERFORM iit._apply_party_patch(v_party, p_party);
@@ -294,9 +381,7 @@ BEGIN
     SELECT * INTO b FROM iit._begin_material_correction(p_deal);
     SELECT party_id INTO v_party FROM iit.deal_parties WHERE deal_id = p_deal AND role = p_role AND ordinal = coalesce(p_ordinal, 1);
     IF v_party IS NULL THEN
-      IF NOT (p_party ? 'party_type') THEN RAISE EXCEPTION 'PARTY_PATCH: party_type is required for a new party'; END IF;
-      INSERT INTO iit.seller_parties(party_type) VALUES (p_party ->> 'party_type') RETURNING id INTO v_party;
-      PERFORM iit._apply_party_patch(v_party, p_party);
+      v_party := iit._insert_party(p_party);
       INSERT INTO iit.deal_parties(deal_id, party_id, role, ordinal) VALUES (p_deal, v_party, p_role, coalesce(p_ordinal, 1)) RETURNING id INTO v_link;
     ELSE
       SELECT pg_catalog.to_jsonb(sp) INTO v_before FROM iit.seller_parties sp WHERE id = v_party;
@@ -470,9 +555,15 @@ BEGIN
     IF p_external_id IS NULL OR pg_catalog.btrim(p_external_id) = '' THEN RAISE EXCEPTION 'FIELD_VALUE: external_id required'; END IF;
     SELECT id INTO v_ref FROM iit.external_references WHERE system = 'vauto_appraisal' AND external_id = p_external_id AND account_context = coalesce(p_account_context, '');
     IF v_ref IS NULL THEN INSERT INTO iit.external_references(system, external_id, account_context) VALUES ('vauto_appraisal', p_external_id, coalesce(p_account_context, '')) RETURNING id INTO v_ref; END IF;
-    -- serialize per appraisal: lock the Deal of the latest episode if any (intake rules read and write that Deal)
+    -- lock order: appraisal identity (external_references row) → Deal of the latest episode → re-read the episode under both
+    -- locks (Codex 004 rev-1 finding 2). resolve_restart takes the same locks in the same order, so no restart can insert an
+    -- episode between the two reads, and a cancellation that held the Deal lock is visible when the episode is re-read.
+    PERFORM 1 FROM iit.external_references WHERE id = v_ref FOR UPDATE;
     SELECT * INTO ep FROM iit.appraisal_episodes WHERE appraisal_ref_id = v_ref ORDER BY episode_no DESC LIMIT 1;
-    IF ep.deal_id IS NOT NULL THEN PERFORM 1 FROM iit.deals WHERE id = ep.deal_id FOR UPDATE; END IF;
+    IF ep.deal_id IS NOT NULL THEN
+      PERFORM 1 FROM iit.deals WHERE id = ep.deal_id FOR UPDATE;
+      SELECT * INTO ep FROM iit.appraisal_episodes WHERE appraisal_ref_id = v_ref ORDER BY episode_no DESC LIMIT 1;
+    END IF;
     SELECT * INTO prev FROM iit.vauto_observations WHERE appraisal_ref_id = v_ref ORDER BY seq DESC LIMIT 1;
     v_hash := pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(p_body::text, 'UTF8')), 'hex');
     v_completed := (p_body -> 'appraisal' ->> 'is_completed')::boolean;
@@ -535,10 +626,12 @@ BEGIN
   v_actor := iit.require_role(p_actor_base44_user_id, 'data_entry');
   v_prev := iit.actor_push(v_actor, 'user');
   BEGIN
-    IF p_decision NOT IN ('restart_new_episode','no_restart') THEN RAISE EXCEPTION 'RESTART_DECISION: % (restart_new_episode | no_restart)', p_decision; END IF;
+    IF p_decision IS NULL OR p_decision NOT IN ('restart_new_episode','no_restart') THEN RAISE EXCEPTION 'RESTART_DECISION: % (restart_new_episode | no_restart)', coalesce(p_decision, 'NULL'); END IF;
     IF p_reason IS NULL OR pg_catalog.btrim(p_reason) = '' THEN RAISE EXCEPTION 'REASON_REQUIRED'; END IF;
-    SELECT deal_id INTO w FROM iit.work_items WHERE id = p_item;
+    SELECT deal_id, appraisal_ref_id INTO w FROM iit.work_items WHERE id = p_item;
     IF NOT FOUND THEN RAISE EXCEPTION 'WORK_ITEM_UNKNOWN: %', p_item; END IF;
+    -- same lock order as ingest_vauto_observation: appraisal identity → Deal → item
+    IF w.appraisal_ref_id IS NOT NULL THEN PERFORM 1 FROM iit.external_references WHERE id = w.appraisal_ref_id FOR UPDATE; END IF;
     IF w.deal_id IS NOT NULL THEN PERFORM 1 FROM iit.deals WHERE id = w.deal_id FOR UPDATE; END IF;
     SELECT * INTO w FROM iit.work_items WHERE id = p_item FOR UPDATE;
     IF w.kind <> 'restart_candidate' THEN RAISE EXCEPTION 'WORK_ITEM_KIND: % is %, not restart_candidate (use resolve_work_item)', p_item, w.kind; END IF;
