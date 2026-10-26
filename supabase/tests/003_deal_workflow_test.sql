@@ -205,18 +205,18 @@ DO $$ DECLARE h3 uuid; h4 uuid; h5 uuid; h6 uuid; c4 uuid; c6 uuid; v int; dec u
   -- a direct (non-function) rebind that lies about the version is caught by the 002 constraints: bound check must match the version
   BEGIN UPDATE iit.audit_holds SET covers_version_no = 6 WHERE id = h5; RAISE EXCEPTION 'W5s direct rebind with a stale check accepted'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
   -- snapshot_contains_changes fails closed on a history row of a table outside the snapshot
-  IF iit.snapshot_contains_changes('00000000-0000-4000-8000-0000000000e5', 6, ARRAY[(SELECT min(id) FROM iit.record_history WHERE table_name='intake_flags')]) NOT LIKE '%has no section in the v6 snapshot' THEN RAISE EXCEPTION 'W5t fail-closed proof'; END IF;
+  IF (iit.snapshot_contains_changes('00000000-0000-4000-8000-0000000000e5', 6, ARRAY[(SELECT min(id) FROM iit.record_history WHERE table_name='intake_flags')]) LIKE '%has no section in the v6 snapshot') IS NOT TRUE THEN RAISE EXCEPTION 'W5t fail-closed proof'; END IF;
   IF iit.snapshot_contains_changes('00000000-0000-4000-8000-0000000000e5', 6, '{}'::bigint[]) IS NULL THEN RAISE EXCEPTION 'W5u empty proof accepted'; END IF;
   -- finding 1: every listed id must exist; NULL elements and all-missing lists fail; a NULL watermark fails
-  IF iit.snapshot_contains_changes('00000000-0000-4000-8000-0000000000e5', 6, ARRAY[9223372036854775807::bigint]) NOT LIKE '0 of 1 listed history ids exist' THEN RAISE EXCEPTION 'W5v missing id accepted'; END IF;
+  IF (iit.snapshot_contains_changes('00000000-0000-4000-8000-0000000000e5', 6, ARRAY[9223372036854775807::bigint]) LIKE '0 of 1 listed history ids exist') IS NOT TRUE THEN RAISE EXCEPTION 'W5v missing id accepted'; END IF;
   SELECT m.history_ids || ARRAY[9223372036854775806::bigint] INTO ids FROM iit.material_corrections m JOIN iit.audit_holds ah ON ah.correction_id = m.id WHERE ah.id = h3;
-  IF iit.snapshot_contains_changes('00000000-0000-4000-8000-0000000000e5', 6, ids) NOT LIKE '1 of 2 listed history ids exist' THEN RAISE EXCEPTION 'W5w partially missing list accepted'; END IF;
-  IF iit.snapshot_contains_changes('00000000-0000-4000-8000-0000000000e5', 6, ARRAY[NULL::bigint]) <> 'correction lists a NULL history id' THEN RAISE EXCEPTION 'W5x NULL id accepted'; END IF;
+  IF (iit.snapshot_contains_changes('00000000-0000-4000-8000-0000000000e5', 6, ids) LIKE '1 of 2 listed history ids exist') IS NOT TRUE THEN RAISE EXCEPTION 'W5w partially missing list accepted'; END IF;
+  IF iit.snapshot_contains_changes('00000000-0000-4000-8000-0000000000e5', 6, ARRAY[NULL::bigint]) IS DISTINCT FROM 'correction lists a NULL history id' THEN RAISE EXCEPTION 'W5x NULL id accepted'; END IF;
   -- a changed column outside the allowlist fails even when its new value is NULL (fc_id: deals.final_closure_at cleared before v6's watermark)
-  IF iit.snapshot_contains_changes('00000000-0000-4000-8000-0000000000e5', 6, ARRAY[fc_id]) NOT LIKE '%deals.final_closure_at is not in the snapshot allowlist' THEN RAISE EXCEPTION 'W5y null-valued unknown column accepted'; END IF;
+  IF (iit.snapshot_contains_changes('00000000-0000-4000-8000-0000000000e5', 6, ARRAY[fc_id]) LIKE '%deals.final_closure_at is not in the snapshot allowlist') IS NOT TRUE THEN RAISE EXCEPTION 'W5y null-valued unknown column accepted'; END IF;
   -- NULL watermark: a direct release row without one cannot be a rebind target
   INSERT INTO iit.deal_versions(deal_id, version_no, status, cause, released_at, snapshot) VALUES ('00000000-0000-4000-8000-0000000000e8', 8, 'released', 'intake', now(), '{}');
-  IF iit.snapshot_contains_changes('00000000-0000-4000-8000-0000000000e8', 8, ARRAY[(SELECT min(id) FROM iit.record_history)]) <> 'v8 has no history watermark' THEN RAISE EXCEPTION 'W5z NULL watermark accepted'; END IF;
+  IF iit.snapshot_contains_changes('00000000-0000-4000-8000-0000000000e8', 8, ARRAY[(SELECT min(id) FROM iit.record_history)]) IS DISTINCT FROM 'v8 has no history watermark' THEN RAISE EXCEPTION 'W5z NULL watermark accepted'; END IF;
   UPDATE iit.deal_versions SET status = 'superseded' WHERE deal_id='00000000-0000-4000-8000-0000000000e8' AND version_no = 8;
 END $$;
 
