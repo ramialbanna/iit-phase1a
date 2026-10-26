@@ -55,11 +55,27 @@ DO $$ BEGIN
   PERFORM set_config('app.actor_kind','',true);
 END $$;
 
--- T7 deactivated staff cannot act on the next call (re-read every call)
+-- T7 deactivated staff cannot act on the next call (re-read every call); deactivation is recorded with before/after and attribution (finding 3)
 SELECT iit.deactivate_staff('b44-new','b44-admin');
-DO $$ BEGIN
+DO $$ DECLARE h record; BEGIN
   BEGIN PERFORM iit.require_role('b44-new','data_entry'); RAISE EXCEPTION 'T7 should have raised'; EXCEPTION WHEN SQLSTATE '28000' THEN NULL; END;
+  SELECT * INTO h FROM iit.record_history WHERE table_name='staff_identities' AND record_key='b44-new' AND op='U' ORDER BY id DESC LIMIT 1;
+  IF h IS NULL OR (h.before->>'active') <> 'true' OR (h.after->>'active') <> 'false' OR h.actor_kind <> 'user' OR h.changed_by <> '00000000-0000-4000-8000-00000000000a' THEN RAISE EXCEPTION 'T7b deactivation history missing or wrong: %', h; END IF;
+  IF NOT EXISTS (SELECT 1 FROM iit.activity_events WHERE action='staff_deactivated' AND actor_id='00000000-0000-4000-8000-00000000000a') THEN RAISE EXCEPTION 'T7c no deactivation activity event'; END IF;
+  -- identity creation was recorded too (op I, actor = admin)
+  IF NOT EXISTS (SELECT 1 FROM iit.record_history WHERE table_name='staff_identities' AND record_key='b44-new' AND op='I' AND changed_by='00000000-0000-4000-8000-00000000000a') THEN RAISE EXCEPTION 'T7d identity creation not recorded'; END IF;
 END $$;
+-- T7e role revocation (a DELETE on user_roles) is recorded as op D with the before image, both via function and directly
+SELECT iit.set_staff_role('00000000-0000-4000-8000-00000000000d', 'audit_lead', true, 'b44-admin');
+SELECT iit.set_staff_role('00000000-0000-4000-8000-00000000000d', 'audit_lead', false, 'b44-admin');
+DELETE FROM iit.user_roles WHERE user_id='00000000-0000-4000-8000-00000000000d' AND role='data_entry';
+DO $$ DECLARE n int; BEGIN
+  SELECT count(*) INTO n FROM iit.record_history WHERE table_name='user_roles' AND record_key='00000000-0000-4000-8000-00000000000d|audit_lead' AND op='D' AND actor_kind='user' AND (before->>'role')='audit_lead';
+  IF n <> 1 THEN RAISE EXCEPTION 'T7e function revocation not recorded (%)', n; END IF;
+  SELECT count(*) INTO n FROM iit.record_history WHERE table_name='user_roles' AND record_key='00000000-0000-4000-8000-00000000000d|data_entry' AND op='D' AND actor_kind='direct';
+  IF n <> 1 THEN RAISE EXCEPTION 'T7f direct revocation not recorded (%)', n; END IF;
+END $$;
+INSERT INTO iit.user_roles(user_id, role) VALUES ('00000000-0000-4000-8000-00000000000d','data_entry');
 
 -- T8 append-only tables reject UPDATE and DELETE; current records reject DELETE
 DO $$ BEGIN
@@ -93,10 +109,19 @@ DO $$ BEGIN
   BEGIN INSERT INTO iit.deal_versions(deal_id, version_no, status, cause) VALUES ('00000000-0000-4000-8000-0000000000e2', 2, 'draft', 'resubmission'); RAISE EXCEPTION 'T10a second draft accepted'; EXCEPTION WHEN unique_violation THEN NULL; END;
   BEGIN UPDATE iit.deal_versions SET status='superseded' WHERE deal_id='00000000-0000-4000-8000-0000000000e2' AND version_no=1; RAISE EXCEPTION 'T10b draft→superseded accepted'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'VERSION_FLOW%' THEN RAISE; END IF; END;
 END $$;
+DO $$ BEGIN
+  BEGIN UPDATE iit.deal_versions SET status='released', released_at=now(), released_by='00000000-0000-4000-8000-00000000000d', snapshot='{"purchase_price":1}'::jsonb, history_watermark=1
+    WHERE deal_id='00000000-0000-4000-8000-0000000000e2' AND version_no=1; RAISE EXCEPTION 'T10i non-empty snapshot accepted while its allowlist is undecided'; EXCEPTION WHEN check_violation THEN NULL; END;
+END $$;
 UPDATE iit.deal_versions SET status='released', released_at=now(), released_by='00000000-0000-4000-8000-00000000000d', snapshot='{}'::jsonb, history_watermark=1
   WHERE deal_id='00000000-0000-4000-8000-0000000000e2' AND version_no=1;
 DO $$ BEGIN
-  BEGIN UPDATE iit.deal_versions SET snapshot='{"x":1}'::jsonb WHERE deal_id='00000000-0000-4000-8000-0000000000e2' AND version_no=1; RAISE EXCEPTION 'T10c released snapshot changed'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'VERSION_IMMUTABLE%' THEN RAISE; END IF; END;
+  BEGIN UPDATE iit.deal_versions SET snapshot='{}'::jsonb, history_watermark=2 WHERE deal_id='00000000-0000-4000-8000-0000000000e2' AND version_no=1; RAISE EXCEPTION 'T10c released watermark changed'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'VERSION_IMMUTABLE%' THEN RAISE; END IF; END;
+  -- finding 2: reassignment or metadata edits alongside status='superseded' are rejected
+  BEGIN UPDATE iit.deal_versions SET status='superseded', deal_id='00000000-0000-4000-8000-0000000000e1' WHERE deal_id='00000000-0000-4000-8000-0000000000e2' AND version_no=1; RAISE EXCEPTION 'T10e reassignment to another deal accepted'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'VERSION_IMMUTABLE%' THEN RAISE; END IF; END;
+  BEGIN UPDATE iit.deal_versions SET status='superseded', version_no=7 WHERE deal_id='00000000-0000-4000-8000-0000000000e2' AND version_no=1; RAISE EXCEPTION 'T10f version_no change accepted'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'VERSION_IMMUTABLE%' THEN RAISE; END IF; END;
+  BEGIN UPDATE iit.deal_versions SET status='superseded', opened_at=now()-interval '1 day' WHERE deal_id='00000000-0000-4000-8000-0000000000e2' AND version_no=1; RAISE EXCEPTION 'T10g opened_at change accepted'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'VERSION_IMMUTABLE%' THEN RAISE; END IF; END;
+  BEGIN UPDATE iit.deal_versions SET status='superseded', released_by='00000000-0000-4000-8000-00000000000a' WHERE deal_id='00000000-0000-4000-8000-0000000000e2' AND version_no=1; RAISE EXCEPTION 'T10h released_by change accepted'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'VERSION_IMMUTABLE%' THEN RAISE; END IF; END;
   UPDATE iit.deal_versions SET status='superseded' WHERE deal_id='00000000-0000-4000-8000-0000000000e2' AND version_no=1;
   BEGIN UPDATE iit.deal_versions SET status='released' WHERE deal_id='00000000-0000-4000-8000-0000000000e2' AND version_no=1; RAISE EXCEPTION 'T10d superseded changed'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'VERSION_IMMUTABLE%' THEN RAISE; END IF; END;
 END $$;
@@ -108,14 +133,40 @@ DO $$ BEGIN
   BEGIN INSERT INTO iit.source_records(kind, created_via, link_status, linked_at) VALUES ('reschedule','appsheet_reschedule','linked',now()); RAISE EXCEPTION 'T11b linked without deal accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
 END $$;
 
--- T12 vauto_observations: allowlist CHECK rejects a stray key, lien.accountNumber and customer.address
-DO $$ DECLARE r uuid; BEGIN
+-- T12 vauto_observations: field-level allowlist (finding 4), A→B→A history allowed, consecutive duplicate suppressed (finding 1)
+DO $$ DECLARE r uuid; n int; BEGIN
   INSERT INTO iit.external_references(system, external_id) VALUES ('vauto_appraisal','A1') RETURNING id INTO r;
-  INSERT INTO iit.vauto_observations(appraisal_ref_id, body, body_hash) VALUES (r, '{"vehicle":{"vin":"X"},"lien":{"owner":"Bank"}}', 'h1');
-  BEGIN INSERT INTO iit.vauto_observations(appraisal_ref_id, body, body_hash) VALUES (r, '{"vehicle":{},"raw":{}}', 'h2'); RAISE EXCEPTION 'T12a stray key accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
-  BEGIN INSERT INTO iit.vauto_observations(appraisal_ref_id, body, body_hash) VALUES (r, '{"lien":{"accountNumber":"1"}}', 'h3'); RAISE EXCEPTION 'T12b accountNumber accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
-  BEGIN INSERT INTO iit.vauto_observations(appraisal_ref_id, body, body_hash) VALUES (r, '{"customer":{"address":"1 st"}}', 'h4'); RAISE EXCEPTION 'T12c customer.address accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
-  BEGIN UPDATE iit.vauto_observations SET body_hash='z' WHERE body_hash='h1'; RAISE EXCEPTION 'T12d observation mutated'; EXCEPTION WHEN SQLSTATE '42501' THEN NULL; END;
+  INSERT INTO iit.vauto_observations(appraisal_ref_id, body, body_hash) VALUES (r, '{"vehicle":{"vin":"X","year":2019},"lien":{"owner":"Bank"}}', 'hA');
+  BEGIN INSERT INTO iit.vauto_observations(appraisal_ref_id, body, body_hash) VALUES (r, '{"vehicle":{"vin":"X"},"raw":{}}', 'h2'); RAISE EXCEPTION 'T12a stray top-level key accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+  BEGIN INSERT INTO iit.vauto_observations(appraisal_ref_id, body, body_hash) VALUES (r, '{"vehicle":{"vin":"X","engine":"V6"}}', 'h3'); RAISE EXCEPTION 'T12b stray NESTED key accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+  BEGIN INSERT INTO iit.vauto_observations(appraisal_ref_id, body, body_hash) VALUES (r, '{"lien":{"accountNumber":"1"}}', 'h4'); RAISE EXCEPTION 'T12c accountNumber accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+  BEGIN INSERT INTO iit.vauto_observations(appraisal_ref_id, body, body_hash) VALUES (r, '{"customer":{"address":"1 st"}}', 'h5'); RAISE EXCEPTION 'T12d customer.address accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+  BEGIN INSERT INTO iit.vauto_observations(appraisal_ref_id, body, body_hash) VALUES (r, '{"vehicle":"not an object"}', 'h6'); RAISE EXCEPTION 'T12e scalar where structure expected accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+  -- consecutive duplicate (same hash as the latest) is suppressed
+  BEGIN INSERT INTO iit.vauto_observations(appraisal_ref_id, body, body_hash) VALUES (r, '{"vehicle":{"vin":"X","year":2019},"lien":{"owner":"Bank"}}', 'hA'); RAISE EXCEPTION 'T12f consecutive duplicate accepted'; EXCEPTION WHEN unique_violation THEN NULL; END;
+  -- A -> B -> A: the return to A is recorded
+  INSERT INTO iit.vauto_observations(appraisal_ref_id, body, body_hash) VALUES (r, '{"vehicle":{"vin":"X","year":2020}}', 'hB');
+  INSERT INTO iit.vauto_observations(appraisal_ref_id, body, body_hash) VALUES (r, '{"vehicle":{"vin":"X","year":2019},"lien":{"owner":"Bank"}}', 'hA');
+  SELECT count(*) INTO n FROM iit.vauto_observations WHERE appraisal_ref_id = r; IF n <> 3 THEN RAISE EXCEPTION 'T12g expected 3 observations (A,B,A), got %', n; END IF;
+  BEGIN UPDATE iit.vauto_observations SET body_hash='z' WHERE body_hash='hB'; RAISE EXCEPTION 'T12h observation mutated'; EXCEPTION WHEN SQLSTATE '42501' THEN NULL; END;
+END $$;
+
+-- T12x source_observations: fail closed while the 3.1 map is undecided (finding 4); current_observation must belong to the record (finding 5)
+DO $$ DECLARE s1 uuid; s2 uuid; o1 uuid; BEGIN
+  SELECT id INTO s1 FROM iit.source_records WHERE deal_id='00000000-0000-4000-8000-0000000000e2' AND kind='initial';
+  INSERT INTO iit.source_records(kind, created_via) VALUES ('cutover_legacy','cutover') RETURNING id INTO s2;
+  BEGIN INSERT INTO iit.source_observations(source_record_id, body, body_hash) VALUES (s1, '{"Deal Status":"In-Progress"}', 'o1'); RAISE EXCEPTION 'T12x-a non-empty 3.1 body accepted while allowlist is empty'; EXCEPTION WHEN check_violation THEN NULL; END;
+  INSERT INTO iit.source_observations(source_record_id, body, body_hash) VALUES (s2, '{}', 'o-empty') RETURNING id INTO o1;
+  BEGIN UPDATE iit.source_records SET current_observation_id = o1 WHERE id = s1; RAISE EXCEPTION 'T12x-b observation of another record accepted as current'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
+  UPDATE iit.source_records SET current_observation_id = o1 WHERE id = s2;   -- own observation: accepted
+END $$;
+
+-- T12y deals.consignment_id must be this deal's consignment (finding 6)
+DO $$ DECLARE p uuid; c1 uuid; BEGIN
+  INSERT INTO iit.seller_parties(party_type, first_name, last_name, phone) VALUES ('person','Con','Signor','(555) 010-0000') RETURNING id INTO p;
+  INSERT INTO iit.consignments(deal_id, consignor_party_id, consignment_amount) VALUES ('00000000-0000-4000-8000-0000000000e1', p, 12000) RETURNING id INTO c1;
+  BEGIN UPDATE iit.deals SET consignment_id = c1 WHERE id='00000000-0000-4000-8000-0000000000e2'; RAISE EXCEPTION 'T12y-a another deal''s consignment accepted'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
+  UPDATE iit.deals SET consignment_id = c1 WHERE id='00000000-0000-4000-8000-0000000000e1';   -- own consignment: accepted
 END $$;
 
 -- T13 appraisal_episodes: one open episode per reference
@@ -171,6 +222,19 @@ DO $$ DECLARE n int; BEGIN
   SELECT count(*) INTO n FROM pg_class c JOIN pg_namespace s ON s.oid=c.relnamespace WHERE s.nspname='iit' AND c.relkind='r' AND NOT c.relrowsecurity;
   IF n <> 0 THEN RAISE EXCEPTION 'T17 % tables without RLS', n; END IF;
   SELECT count(*) INTO n FROM pg_policies WHERE schemaname='iit'; IF n <> 0 THEN RAISE EXCEPTION 'T17b unexpected policies'; END IF;
+END $$;
+
+-- T18 history coverage inventory (finding 3): every table in iit has either the history trigger or append-only enforcement
+DO $$ DECLARE r record; missing text := ''; BEGIN
+  FOR r IN SELECT c.relname FROM pg_class c JOIN pg_namespace s ON s.oid=c.relnamespace WHERE s.nspname='iit' AND c.relkind='r' LOOP
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_class c2 ON c2.oid=t.tgrelid JOIN pg_namespace s2 ON s2.oid=c2.relnamespace WHERE s2.nspname='iit' AND c2.relname=r.relname AND t.tgname IN ('zz_history','zz_append_only')) THEN
+      missing := missing || r.relname || ' '; END IF; END LOOP;
+  IF missing <> '' THEN RAISE EXCEPTION 'T18 tables without history/append-only coverage: %', missing; END IF;
+END $$;
+
+-- T19 activity_events detail allowlist: a key outside the schema is rejected
+DO $$ BEGIN
+  BEGIN INSERT INTO iit.activity_events(entity_type, action, after, actor_kind, source) VALUES ('x','y','{"secret":"s"}','direct','t'); RAISE EXCEPTION 'T19 stray activity detail key accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
 END $$;
 
 SELECT 'ALL 001 TESTS PASS' AS result;

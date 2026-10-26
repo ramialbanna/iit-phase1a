@@ -121,9 +121,12 @@ END $$;
 -- ---------------------------------------------------------------------------------------------------------------------
 CREATE TABLE iit.record_history (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  table_name text NOT NULL, record_id uuid NOT NULL,
-  op text NOT NULL CHECK (op IN ('I','U')),
-  before jsonb, after jsonb NOT NULL,                       -- allowlisted column values only (§7): row_to_json of the table row
+  table_name text NOT NULL,
+  record_key text NOT NULL,                                 -- primary key value(s) as text ("a|b" for composite keys)
+  record_id uuid NULL,                                      -- the uuid id when the table has one (convenience for joins)
+  op text NOT NULL CHECK (op IN ('I','U','D')),
+  before jsonb, after jsonb,                                -- to_jsonb(row): the tables hold only allowlisted columns (§7), so history does too
+  CHECK ((op = 'I') = (before IS NULL)), CHECK ((op = 'D') = (after IS NULL)),
   changed_by uuid NULL REFERENCES iit.users(id),
   actor_kind text NOT NULL CHECK (actor_kind IN ('user','worker','system','direct')),
   via_trigger text NULL,
@@ -131,12 +134,19 @@ CREATE TABLE iit.record_history (
   at timestamptz NOT NULL DEFAULT pg_catalog.clock_timestamp(),
   CHECK ((actor_kind = 'direct') = (changed_by IS NULL))
 );
-CREATE INDEX record_history_record_idx ON iit.record_history (table_name, record_id, id);
+CREATE INDEX record_history_record_idx ON iit.record_history (table_name, record_key, id);
 
 -- SECURITY INVOKER on purpose (§5.9.2): current_user inside = the executing role (definer owner for function writes).
 CREATE FUNCTION iit.history_trigger() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path = '' AS $$
-DECLARE v_kind text; v_user text; v_uid uuid; v_role text; v_jwt text; v_claims text;
+DECLARE v_kind text; v_user text; v_uid uuid; v_role text; v_jwt text; v_claims text; v_row jsonb; v_key text; v_rid uuid; i int;
 BEGIN
+  -- TG_ARGV[0] = comma-separated key column names (default 'id'); the key is read from the row image
+  v_row := CASE TG_OP WHEN 'DELETE' THEN pg_catalog.to_jsonb(OLD) ELSE pg_catalog.to_jsonb(NEW) END;
+  v_key := '';
+  FOR i IN 1 .. pg_catalog.array_length(pg_catalog.string_to_array(coalesce(TG_ARGV[0], 'id'), ','), 1) LOOP
+    v_key := v_key || CASE WHEN i > 1 THEN '|' ELSE '' END || coalesce(v_row ->> (pg_catalog.string_to_array(coalesce(TG_ARGV[0], 'id'), ','))[i], '');
+  END LOOP;
+  v_rid := CASE WHEN (v_row ? 'id') AND (v_row ->> 'id') ~ '^[0-9a-f-]{36}$' THEN (v_row ->> 'id')::uuid END;
   v_kind := nullif(pg_catalog.current_setting('app.actor_kind', true), '');
   v_user := nullif(pg_catalog.current_setting('app.actor_user_id', true), '');
   IF v_kind IS NULL THEN
@@ -149,13 +159,13 @@ BEGIN
   v_role := nullif(pg_catalog.current_setting('role', true), 'none');
   v_claims := pg_catalog.current_setting('request.jwt.claims', true);
   v_jwt := CASE WHEN v_claims IS NULL OR v_claims = '' THEN NULL ELSE (v_claims::jsonb ->> 'role') END;
-  INSERT INTO iit.record_history(table_name, record_id, op, before, after, changed_by, actor_kind, via_trigger,
+  INSERT INTO iit.record_history(table_name, record_key, record_id, op, before, after, changed_by, actor_kind, via_trigger,
                                  exec_role, origin_role, origin_jwt_role, origin_session_role)
-  VALUES (TG_TABLE_NAME, NEW.id, CASE TG_OP WHEN 'INSERT' THEN 'I' ELSE 'U' END,
-          CASE TG_OP WHEN 'UPDATE' THEN pg_catalog.to_jsonb(OLD) END, pg_catalog.to_jsonb(NEW),
+  VALUES (TG_TABLE_NAME, v_key, v_rid, CASE TG_OP WHEN 'INSERT' THEN 'I' WHEN 'UPDATE' THEN 'U' ELSE 'D' END,
+          CASE WHEN TG_OP IN ('UPDATE','DELETE') THEN pg_catalog.to_jsonb(OLD) END, CASE WHEN TG_OP IN ('INSERT','UPDATE') THEN pg_catalog.to_jsonb(NEW) END,
           v_uid, v_kind, nullif(pg_catalog.current_setting('app.via_trigger', true), ''),
           current_user, v_role, v_jwt, session_user);
-  RETURN NEW;
+  RETURN COALESCE(NEW, OLD);
 END $$;
 
 CREATE FUNCTION iit.reject_mutation() RETURNS trigger LANGUAGE plpgsql SET search_path = '' AS $$
@@ -165,10 +175,17 @@ CREATE FUNCTION iit.reject_delete() RETURNS trigger LANGUAGE plpgsql SET search_
 BEGIN RAISE EXCEPTION 'NO_DELETE: current records in %.% are never deleted', TG_TABLE_SCHEMA, TG_TABLE_NAME USING ERRCODE = '42501'; END $$;
 
 -- helper: attach the history model to a mutable current-record table (requires an `id uuid` column)
-CREATE FUNCTION iit.attach_history(p_table regclass) RETURNS void LANGUAGE plpgsql SET search_path = '' AS $$
+-- p_key_cols: primary-key column(s) recorded as record_key. p_allow_delete: current records are never deleted (default);
+-- membership/reference rows that are legitimately removed (e.g. user_roles) record a 'D' history row instead.
+CREATE FUNCTION iit.attach_history(p_table regclass, p_key_cols text DEFAULT 'id', p_allow_delete boolean DEFAULT false) RETURNS void
+LANGUAGE plpgsql SET search_path = '' AS $$
 BEGIN
-  EXECUTE pg_catalog.format('CREATE TRIGGER zz_history AFTER INSERT OR UPDATE ON %s FOR EACH ROW EXECUTE FUNCTION iit.history_trigger()', p_table);
-  EXECUTE pg_catalog.format('CREATE TRIGGER zz_no_delete BEFORE DELETE ON %s FOR EACH ROW EXECUTE FUNCTION iit.reject_delete()', p_table);
+  IF p_allow_delete THEN
+    EXECUTE pg_catalog.format('CREATE TRIGGER zz_history AFTER INSERT OR UPDATE OR DELETE ON %s FOR EACH ROW EXECUTE FUNCTION iit.history_trigger(%L)', p_table, p_key_cols);
+  ELSE
+    EXECUTE pg_catalog.format('CREATE TRIGGER zz_history AFTER INSERT OR UPDATE ON %s FOR EACH ROW EXECUTE FUNCTION iit.history_trigger(%L)', p_table, p_key_cols);
+    EXECUTE pg_catalog.format('CREATE TRIGGER zz_no_delete BEFORE DELETE ON %s FOR EACH ROW EXECUTE FUNCTION iit.reject_delete()', p_table);
+  END IF;
 END $$;
 CREATE FUNCTION iit.make_append_only(p_table regclass) RETURNS void LANGUAGE plpgsql SET search_path = '' AS $$
 BEGIN
@@ -176,7 +193,73 @@ BEGIN
 END $$;
 
 SELECT iit.make_append_only('iit.record_history');
+-- History coverage of §1 staff tables (Codex 001 finding 3): identities and role membership are security-relevant state.
 SELECT iit.attach_history('iit.users');
+SELECT iit.attach_history('iit.staff_identities', 'base44_user_id');
+SELECT iit.attach_history('iit.user_roles', 'user_id,role', true);         -- revocation is a recorded DELETE
+SELECT iit.attach_history('iit.external_user_map', 'system,external_username', true);
+SELECT iit.attach_history('iit.roles', 'name');
+
+-- §7 storage policy — FIELD-LEVEL allowlists, fail closed (Codex 001 finding 4).
+-- iit.json_schemas holds one allowlist per stored JSON body. A schema is a JSON object: key → true (leaf allowed) or → a nested
+-- schema object. A body matches only if every key at every level is present in the schema. An EMPTY schema admits only an empty
+-- object: that is the fail-closed state for bodies whose allowlist is still undecided (D-7 nested vAuto fields; D-8 3.1 map).
+CREATE TABLE iit.json_schemas (
+  name text PRIMARY KEY, schema jsonb NOT NULL CHECK (pg_catalog.jsonb_typeof(schema) = 'object'),
+  note text NOT NULL, updated_at timestamptz NOT NULL DEFAULT now()
+);
+SELECT iit.attach_history('iit.json_schemas', 'name');
+CREATE FUNCTION iit.json_matches_schema(p_body jsonb, p_schema jsonb) RETURNS boolean
+LANGUAGE plpgsql IMMUTABLE SET search_path = '' AS $$
+DECLARE k text; v jsonb; sv jsonb;
+BEGIN
+  IF pg_catalog.jsonb_typeof(p_body) <> 'object' OR pg_catalog.jsonb_typeof(p_schema) <> 'object' THEN RETURN false; END IF;
+  FOR k, v IN SELECT * FROM pg_catalog.jsonb_each(p_body) LOOP
+    sv := p_schema -> k;
+    IF sv IS NULL THEN RETURN false; END IF;                                   -- key not allowlisted
+    IF pg_catalog.jsonb_typeof(sv) = 'object' THEN
+      IF pg_catalog.jsonb_typeof(v) = 'object' THEN
+        IF NOT iit.json_matches_schema(v, sv) THEN RETURN false; END IF;
+      ELSIF pg_catalog.jsonb_typeof(v) = 'array' THEN                          -- array of objects: each element must match
+        IF EXISTS (SELECT 1 FROM pg_catalog.jsonb_array_elements(v) e WHERE pg_catalog.jsonb_typeof(e) <> 'object' OR NOT iit.json_matches_schema(e, sv)) THEN RETURN false; END IF;
+      ELSE RETURN false; END IF;                                               -- schema expects a structure, body has a scalar
+    ELSIF sv <> 'true'::jsonb THEN RETURN false; END IF;
+  END LOOP;
+  RETURN true;
+END $$;
+-- generic BEFORE trigger: iit.enforce_json(<column>, <schema name>) — raises STORAGE_POLICY on any non-allowlisted key
+CREATE FUNCTION iit.enforce_json() RETURNS trigger LANGUAGE plpgsql SET search_path = '' AS $$
+DECLARE v_body jsonb; v_schema jsonb;
+BEGIN
+  v_body := pg_catalog.to_jsonb(NEW) -> TG_ARGV[0];
+  IF v_body IS NULL OR v_body = 'null'::jsonb THEN RETURN NEW; END IF;         -- NULL column is fine; NOT NULL is the table's job
+  SELECT schema INTO v_schema FROM iit.json_schemas WHERE name = TG_ARGV[1];
+  IF v_schema IS NULL THEN RAISE EXCEPTION 'STORAGE_POLICY: no allowlist % for %.%', TG_ARGV[1], TG_TABLE_NAME, TG_ARGV[0] USING ERRCODE = '23514'; END IF;
+  IF NOT iit.json_matches_schema(v_body, v_schema) THEN
+    RAISE EXCEPTION 'STORAGE_POLICY: %.% contains a key outside allowlist %', TG_TABLE_NAME, TG_ARGV[0], TG_ARGV[1] USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END $$;
+-- vAuto observation allowlist: the fields the design NAMES in §7 ("vehicle, appraisal value, personnel, customer name/phone/
+-- email/postal code/city/state, title region/name, tag, lien owner/phone/payoff/payoff date/per diem, condition, timestamps,
+-- sanitized notes"). Field names below are the design's words; the Worker's sanitizer must map vAuto's names onto exactly these,
+-- and anything not listed is REJECTED. Extending the list is a reviewed change to this table (D-7).
+INSERT INTO iit.json_schemas(name, schema, note) VALUES
+ ('vauto_observation', '{
+   "vehicle":   {"vin":true,"year":true,"make":true,"model":true,"series":true,"trim":true,"exterior_color":true,"mileage":true},
+   "appraisal": {"value":true,"status":true,"is_completed":true},
+   "personnel": {"appraiser":true,"buyer":true,"closer":true},
+   "customer":  {"first_name":true,"last_name":true,"phone":true,"email":true,"postal_code":true,"city":true,"state":true},
+   "title":     {"region":true,"name":true},
+   "tag":       {"value":true},
+   "lien":      {"owner":true,"phone":true,"payoff":true,"payoff_date":true,"per_diem":true},
+   "condition": {"summary":true},
+   "timestamps":{"created":true,"last_modified":true,"completed":true},
+   "notes_sanitized": {"labels": {"label":true,"value":true}}
+ }', '§7 vAuto observations; nested names per the design text, to be confirmed against the Appraisal API (D-7)'),
+ ('source_observation_31', '{}', 'FAIL CLOSED until the 3.1 field map (groups A–E) is in the repo (D-8): no key is allowed yet'),
+ ('deal_version_snapshot', '{}', 'FAIL CLOSED until release_deal defines the allowlisted snapshot columns (later slice)'),
+ ('activity_event_detail', '{"role":true}', 'activity_events.before/after: only keys written by functions in this slice');
 
 -- ---------------------------------------------------------------------------------------------------------------------
 -- 4. reference data: organizations, source channels, required facts, material fields, settings, shift calendar
@@ -194,6 +277,7 @@ CREATE TABLE iit.organization_roles (          -- §4: lienholder / business_sel
   PRIMARY KEY (org_id, role)
 );
 SELECT iit.attach_history('iit.organizations');
+SELECT iit.attach_history('iit.organization_roles', 'org_id,role', true);
 
 CREATE TABLE iit.source_channels (             -- §5.2 G9 seeds; route is reference data (D12)
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -208,6 +292,7 @@ INSERT INTO iit.source_channels(name, route, origin) VALUES
   ('Brown Fig – OpenLane', 'skip_audit', 'manual_exception'),
   ('Brown Fig – ACV',      'skip_audit', 'manual_exception');
 -- vAuto Source values and their routes are NOT seeded: they are the owner's list (docs/migrations/001.md D-4).
+SELECT iit.attach_history('iit.source_channels');
 
 CREATE TABLE iit.required_fact_rules (         -- §5.7 G13: which intake facts are required at release, by origin
   origin text NOT NULL CHECK (origin IN ('vauto_intake','manual_consignment','manual_exception')),
@@ -235,16 +320,20 @@ INSERT INTO iit.material_fields VALUES
   ('purchase_price','D21 price'),('vin','D21 VIN'),('seller_parties','D21 owner/sellers'),
   ('lien_position','D21 lien position'),('lienholder','D21 lienholder'),('title_state','D21 title state'),('is_tribal','D21 tribal flag');
 -- R2 (Source/channel change after release as material) is a PROPOSAL, not seeded — docs/migrations/001.md D-5.
+SELECT iit.attach_history('iit.required_fact_rules', 'origin,fact', true);
+SELECT iit.attach_history('iit.material_fields', 'field', true);
 
 CREATE TABLE iit.system_settings (
   key text PRIMARY KEY, value jsonb NOT NULL, updated_at timestamptz NOT NULL DEFAULT now()
 );
 INSERT INTO iit.system_settings VALUES ('legacy_31_consignment_total_price', '"1.99"'::jsonb, now());
+SELECT iit.attach_history('iit.system_settings', 'key');
 
 CREATE TABLE iit.shift_calendar (              -- T50: staffed working hours (dated); content to be supplied by the owner (D-6)
   day date NOT NULL, start_at timestamptz NOT NULL, end_at timestamptz NOT NULL,
   PRIMARY KEY (day, start_at), CHECK (end_at > start_at)
 );
+SELECT iit.attach_history('iit.shift_calendar', 'day,start_at', true);
 
 -- ---------------------------------------------------------------------------------------------------------------------
 -- 5. vehicles (§5.1)
@@ -314,16 +403,17 @@ CREATE FUNCTION iit.deal_versions_guard() RETURNS trigger LANGUAGE plpgsql SET s
 BEGIN
   IF OLD.status = 'superseded' THEN RAISE EXCEPTION 'VERSION_IMMUTABLE: superseded version % of deal % cannot change', OLD.version_no, OLD.deal_id; END IF;
   IF OLD.status = 'released' THEN
-    IF NOT (NEW.status = 'superseded' AND NEW.snapshot IS NOT DISTINCT FROM OLD.snapshot AND NEW.history_watermark IS NOT DISTINCT FROM OLD.history_watermark
-            AND NEW.released_at IS NOT DISTINCT FROM OLD.released_at AND NEW.released_by IS NOT DISTINCT FROM OLD.released_by AND NEW.cause = OLD.cause) THEN
-      RAISE EXCEPTION 'VERSION_IMMUTABLE: released version % of deal % may only move to superseded', OLD.version_no, OLD.deal_id;
+    -- the COMPLETE row except status must be unchanged (Codex 001 finding 2): no reassignment of deal_id/version_no, no metadata edits
+    IF NOT (NEW.status = 'superseded' AND (pg_catalog.to_jsonb(NEW) - 'status') = (pg_catalog.to_jsonb(OLD) - 'status')) THEN
+      RAISE EXCEPTION 'VERSION_IMMUTABLE: released version % of deal % may only change status to superseded', OLD.version_no, OLD.deal_id;
     END IF;
   END IF;
   IF OLD.status = 'draft' AND NEW.status = 'superseded' THEN RAISE EXCEPTION 'VERSION_FLOW: a draft cannot be superseded directly'; END IF;
   RETURN NEW;
 END $$;
 CREATE TRIGGER deal_versions_guard BEFORE UPDATE ON iit.deal_versions FOR EACH ROW EXECUTE FUNCTION iit.deal_versions_guard();
-CREATE TRIGGER zz_no_delete BEFORE DELETE ON iit.deal_versions FOR EACH ROW EXECUTE FUNCTION iit.reject_delete();
+CREATE TRIGGER deal_versions_snapshot_policy BEFORE INSERT OR UPDATE ON iit.deal_versions FOR EACH ROW EXECUTE FUNCTION iit.enforce_json('snapshot', 'deal_version_snapshot');
+SELECT iit.attach_history('iit.deal_versions', 'deal_id,version_no');   -- composite key; versions are never deleted
 
 CREATE TABLE iit.deal_amendments (             -- §5.5 administrative corrections, append-only
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -356,6 +446,7 @@ CREATE TABLE iit.external_references (
   first_seen_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (system, external_id, account_context)
 );
+SELECT iit.attach_history('iit.external_references');
 CREATE TABLE iit.appraisal_episodes (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   appraisal_ref_id uuid NOT NULL REFERENCES iit.external_references(id),
@@ -370,26 +461,29 @@ CREATE TABLE iit.appraisal_episodes (
 CREATE UNIQUE INDEX one_open_episode ON iit.appraisal_episodes (appraisal_ref_id) WHERE ended_at IS NULL;
 SELECT iit.attach_history('iit.appraisal_episodes');
 
--- §7 allowlist for vAuto observation bodies. The key list is the DESIGN's (§7 "vAuto observations"); the exact vAuto field
--- names are mapped by the Worker's sanitizer and must be confirmed against the Appraisal API (docs/migrations/001.md D-7).
-CREATE FUNCTION iit.json_is_clean(p_body jsonb, p_allowed text[]) RETURNS boolean
-LANGUAGE sql IMMUTABLE SET search_path = '' AS $$
-  SELECT pg_catalog.jsonb_typeof(p_body) = 'object'
-     AND NOT EXISTS (SELECT 1 FROM pg_catalog.jsonb_object_keys(p_body) k WHERE NOT (k = ANY (p_allowed)))
-$$;
 CREATE TABLE iit.vauto_observations (          -- append-only evidence of every read whose content changed
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   appraisal_ref_id uuid NOT NULL REFERENCES iit.external_references(id),
   is_completed boolean, last_modified timestamptz, created_at_vauto timestamptz,
-  body jsonb NOT NULL,                         -- allowlisted top-level groups only
+  body jsonb NOT NULL,                         -- allowlisted per iit.json_schemas 'vauto_observation' (trigger below)
   body_hash text NOT NULL,
   fetched_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (appraisal_ref_id, body_hash),
-  CHECK (iit.json_is_clean(body, ARRAY['vehicle','appraisal','personnel','customer','title','tag','lien','condition','timestamps','notes_sanitized'])),
-  CHECK (NOT (body #> '{lien}' ? 'accountNumber')),
+  seq bigint GENERATED ALWAYS AS IDENTITY,     -- insertion order (fetched_at can tie inside one transaction)
+  CHECK (NOT (body #> '{lien}' ? 'accountNumber')),       -- belt-and-braces for the two design-named prohibitions
   CHECK (NOT (body #> '{customer}' ? 'address'))
 );
 SELECT iit.make_append_only('iit.vauto_observations');
+CREATE TRIGGER vauto_observations_policy BEFORE INSERT ON iit.vauto_observations FOR EACH ROW EXECUTE FUNCTION iit.enforce_json('body', 'vauto_observation');
+-- A new observation is stored only when content changed vs the LATEST observation of that appraisal (design §5.3 "only when
+-- payload_hash changes"). A later return to earlier content (A→B→A) IS recorded — lifetime uniqueness was wrong (Codex 001 finding 1).
+CREATE FUNCTION iit.vauto_observations_dedupe() RETURNS trigger LANGUAGE plpgsql SET search_path = '' AS $$
+DECLARE v_last text;
+BEGIN
+  SELECT body_hash INTO v_last FROM iit.vauto_observations WHERE appraisal_ref_id = NEW.appraisal_ref_id ORDER BY seq DESC LIMIT 1;
+  IF v_last = NEW.body_hash THEN RAISE EXCEPTION 'UNCHANGED_OBSERVATION: latest observation for % already has hash %', NEW.appraisal_ref_id, NEW.body_hash USING ERRCODE = '23505'; END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER vauto_observations_dedupe BEFORE INSERT ON iit.vauto_observations FOR EACH ROW EXECUTE FUNCTION iit.vauto_observations_dedupe();
 
 -- ---------------------------------------------------------------------------------------------------------------------
 -- 8. source records (§5.4): 3.1 rows the tool knows about, and their immutable read-backs
@@ -421,12 +515,14 @@ CREATE TABLE iit.source_observations (         -- one row per 3.1 read-back, all
   source_record_id uuid NOT NULL REFERENCES iit.source_records(id),
   body jsonb NOT NULL, body_hash text NOT NULL,
   observed_at timestamptz NOT NULL DEFAULT now(),
-  CHECK (pg_catalog.jsonb_typeof(body) = 'object')
-  -- the exact 3.1 allowlist (field-map groups A–E) is applied by the Worker and enforced here once the map is in the repo (D-8)
+  UNIQUE (id, source_record_id)                -- lets source_records reference "this observation OF this record"
 );
 SELECT iit.make_append_only('iit.source_observations');
+-- body allowlist: 'source_observation_31' is EMPTY until the 3.1 field map is in the repo → every non-empty body is rejected (D-8)
+CREATE TRIGGER source_observations_policy BEFORE INSERT ON iit.source_observations FOR EACH ROW EXECUTE FUNCTION iit.enforce_json('body', 'source_observation_31');
+-- current_observation_id must belong to THIS source record (Codex 001 finding 5)
 ALTER TABLE iit.source_records ADD CONSTRAINT source_records_current_obs_fk
-  FOREIGN KEY (current_observation_id) REFERENCES iit.source_observations(id);
+  FOREIGN KEY (current_observation_id, id) REFERENCES iit.source_observations(id, source_record_id);
 
 -- ---------------------------------------------------------------------------------------------------------------------
 -- 9. seller, title, lien, consignments, valuations (§5.5 v0.1 + v0.17 refinements)
@@ -477,10 +573,12 @@ CREATE TABLE iit.consignments (                -- PR3: consignor amount never fe
   deal_id uuid NOT NULL UNIQUE REFERENCES iit.deals(id),
   consignor_party_id uuid NOT NULL REFERENCES iit.seller_parties(id),
   consignment_amount numeric(14,2),
-  notes text
+  notes text,
+  UNIQUE (id, deal_id)                         -- lets deals reference "this consignment OF this deal"
 );
 SELECT iit.attach_history('iit.consignments');
-ALTER TABLE iit.deals ADD CONSTRAINT deals_consignment_fk FOREIGN KEY (consignment_id) REFERENCES iit.consignments(id);
+-- deals.consignment_id must be a consignment of THIS deal (Codex 001 finding 6)
+ALTER TABLE iit.deals ADD CONSTRAINT deals_consignment_fk FOREIGN KEY (consignment_id, id) REFERENCES iit.consignments(id, deal_id);
 CREATE TABLE iit.valuations (                  -- append-only
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   vehicle_id uuid NOT NULL REFERENCES iit.vehicles(id), deal_id uuid REFERENCES iit.deals(id),
@@ -535,6 +633,8 @@ CREATE TABLE iit.activity_events (             -- append-only (v0.1 §5.11); act
 );
 CREATE INDEX activity_deal_idx ON iit.activity_events (deal_id, occurred_at);
 SELECT iit.make_append_only('iit.activity_events');
+CREATE TRIGGER activity_before_policy BEFORE INSERT ON iit.activity_events FOR EACH ROW EXECUTE FUNCTION iit.enforce_json('before', 'activity_event_detail');
+CREATE TRIGGER activity_after_policy  BEFORE INSERT ON iit.activity_events FOR EACH ROW EXECUTE FUNCTION iit.enforce_json('after',  'activity_event_detail');
 
 -- ---------------------------------------------------------------------------------------------------------------------
 -- 11. staff management functions (§2.2): the only staff-facing entry points in this slice
@@ -581,6 +681,8 @@ BEGIN
   v_prev := iit.actor_push(v_actor, 'user');
   UPDATE iit.staff_identities SET active = false, deactivated_at = now() WHERE base44_user_id = p_base44_user_id AND active;
   IF NOT FOUND THEN PERFORM iit.actor_restore(v_prev); RAISE EXCEPTION 'STAFF_NOT_ACTIVE: %', p_base44_user_id; END IF;
+  INSERT INTO iit.activity_events(entity_type, entity_id, action, actor_id, actor_kind, source)
+    SELECT 'user', user_id, 'staff_deactivated', v_actor, 'user', 'admin_ui' FROM iit.staff_identities WHERE base44_user_id = p_base44_user_id;
   PERFORM iit.actor_restore(v_prev);
 END $$;
 
