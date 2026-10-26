@@ -73,7 +73,14 @@ DO $$ DECLARE v int; msg text; f uuid; r uuid; n bigint; ver record; snap jsonb;
   BEGIN PERFORM iit.release_deal('00000000-0000-4000-8000-0000000000e5','b44-de'); RAISE EXCEPTION 'W2n released twice'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'RELEASE_REFUSED: % no open draft' THEN RAISE; END IF; END;
   -- D-5: Source change after release is refused; the same channel is a no-op
   BEGIN PERFORM iit.set_source_channel('00000000-0000-4000-8000-0000000000e5','TEST vAuto Service','b44-de'); RAISE EXCEPTION 'W2o source changed after release'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'SOURCE_CHANGE_AFTER_RELEASE_UNDECIDED%' THEN RAISE; END IF; END;
+  SELECT max(id) INTO wm FROM iit.record_history; SELECT count(*) INTO n FROM iit.activity_events WHERE deal_id='00000000-0000-4000-8000-0000000000e5';
   PERFORM iit.set_source_channel('00000000-0000-4000-8000-0000000000e5','TEST vAuto Retail','b44-de');
+  IF (SELECT max(id) FROM iit.record_history) <> wm OR (SELECT count(*) FROM iit.activity_events WHERE deal_id='00000000-0000-4000-8000-0000000000e5') <> n THEN RAISE EXCEPTION 'W2p2 same-channel call after release wrote something'; END IF;
+  -- rev-1 finding 4: the reference channel's route changes after release; re-selecting the same channel must not re-route the deal
+  UPDATE iit.source_channels SET route = 'skip_audit' WHERE name = 'TEST vAuto Retail';
+  BEGIN PERFORM iit.set_source_channel('00000000-0000-4000-8000-0000000000e5','TEST vAuto Retail','b44-de'); RAISE EXCEPTION 'W2q route drift applied'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'ROUTE_CHANGED_AFTER_RELEASE%' THEN RAISE; END IF; END;
+  UPDATE iit.source_channels SET route = 'risk_audit' WHERE name = 'TEST vAuto Retail';
+  IF (SELECT consumer_route FROM iit.deals WHERE id='00000000-0000-4000-8000-0000000000e5') <> 'risk_audit' THEN RAISE EXCEPTION 'W2r route cache changed after release'; END IF;
   IF current_setting('app.actor_kind', true) <> '' THEN RAISE EXCEPTION 'W2p actor context leaked'; END IF;
 END $$;
 
@@ -87,6 +94,7 @@ END $$;
 DO $$ DECLARE no int; dec uuid; wi record; BEGIN
   BEGIN PERFORM iit.amend_field('00000000-0000-4000-8000-0000000000e6','dealer_sold_to','"X"','x','b44-de'); RAISE EXCEPTION 'W3a amended an unreleased deal'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'NOT_RELEASED%' THEN RAISE; END IF; END;
   BEGIN PERFORM iit.amend_field('00000000-0000-4000-8000-0000000000e5','purchase_price','1','x','b44-de'); RAISE EXCEPTION 'W3b material field amended'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'MATERIAL_FIELD%' THEN RAISE; END IF; END;
+  BEGIN PERFORM iit.amend_field('00000000-0000-4000-8000-0000000000e5','lienholder_name_raw','"Other Bank"','x','b44-de'); RAISE EXCEPTION 'W3b2 raw lienholder amended (finding 3)'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'MATERIAL_FIELD%' THEN RAISE; END IF; END;
   BEGIN PERFORM iit.amend_field('00000000-0000-4000-8000-0000000000e5','deposit_amount','1','x','b44-de'); RAISE EXCEPTION 'W3c deposit amended (D-20 open)'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'FIELD_UNSUPPORTED%' THEN RAISE; END IF; END;
   BEGIN PERFORM iit.amend_field('00000000-0000-4000-8000-0000000000e5','dealer_sold_to','"Dealer X"','','b44-de'); RAISE EXCEPTION 'W3d no reason'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'REASON_REQUIRED%' THEN RAISE; END IF; END;
   -- approve v1 first, so we can show the approval survives the amendment
@@ -151,7 +159,7 @@ DO $$ DECLARE corr uuid; h record; mc record; c1 uuid; c2 uuid; dec uuid; v int;
 END $$;
 
 -- W5 rebind_hold (§5.7a G4, invariant 42): proof-based rebinding when the covering version was superseded before approval
-DO $$ DECLARE h3 uuid; h4 uuid; h5 uuid; h6 uuid; c4 uuid; c6 uuid; v int; dec uuid; msg text; corr uuid; BEGIN
+DO $$ DECLARE h3 uuid; h4 uuid; h5 uuid; h6 uuid; c4 uuid; c6 uuid; v int; dec uuid; msg text; corr uuid; ids bigint[]; fc_id bigint; BEGIN
   -- v3: price 22000, released, NOT approved
   corr := iit.correct_field('00000000-0000-4000-8000-0000000000e5','purchase_price','22000','second invoice','b44-de'); SELECT id INTO h3 FROM iit.audit_holds WHERE correction_id = corr;
   v := iit.release_deal('00000000-0000-4000-8000-0000000000e5','b44-de'); IF v <> 3 THEN RAISE EXCEPTION 'W5a'; END IF;
@@ -181,6 +189,9 @@ DO $$ DECLARE h3 uuid; h4 uuid; h5 uuid; h6 uuid; c4 uuid; c6 uuid; v int; dec u
   -- NEGATIVE proof: v5 sets price 23000 (not approved); v6 overwrites it with 24000 → v6's snapshot does NOT contain v5's change
   corr := iit.correct_field('00000000-0000-4000-8000-0000000000e5','purchase_price','23000','third invoice','b44-de'); SELECT id INTO h5 FROM iit.audit_holds WHERE correction_id = corr;
   v := iit.release_deal('00000000-0000-4000-8000-0000000000e5','b44-de'); IF v <> 5 THEN RAISE EXCEPTION 'W5m'; END IF;
+  UPDATE iit.deals SET final_closure_at = now() WHERE id='00000000-0000-4000-8000-0000000000e5';   -- for W5y: a non-snapshot column changed to NULL, below v6's watermark
+  UPDATE iit.deals SET final_closure_at = NULL WHERE id='00000000-0000-4000-8000-0000000000e5';
+  SELECT max(id) INTO fc_id FROM iit.record_history WHERE table_name='deals' AND record_id='00000000-0000-4000-8000-0000000000e5';
   corr := iit.correct_field('00000000-0000-4000-8000-0000000000e5','purchase_price','24000','fourth invoice','b44-de'); SELECT id INTO h6 FROM iit.audit_holds WHERE correction_id = corr;
   v := iit.release_deal('00000000-0000-4000-8000-0000000000e5','b44-de'); IF v <> 6 THEN RAISE EXCEPTION 'W5n'; END IF;
   BEGIN PERFORM iit.rebind_hold(h5, 'try', 'b44-lead'); RAISE EXCEPTION 'W5o rebound without containment';
@@ -196,6 +207,17 @@ DO $$ DECLARE h3 uuid; h4 uuid; h5 uuid; h6 uuid; c4 uuid; c6 uuid; v int; dec u
   -- snapshot_contains_changes fails closed on a history row of a table outside the snapshot
   IF iit.snapshot_contains_changes('00000000-0000-4000-8000-0000000000e5', 6, ARRAY[(SELECT min(id) FROM iit.record_history WHERE table_name='intake_flags')]) NOT LIKE '%has no section in the v6 snapshot' THEN RAISE EXCEPTION 'W5t fail-closed proof'; END IF;
   IF iit.snapshot_contains_changes('00000000-0000-4000-8000-0000000000e5', 6, '{}'::bigint[]) IS NULL THEN RAISE EXCEPTION 'W5u empty proof accepted'; END IF;
+  -- finding 1: every listed id must exist; NULL elements and all-missing lists fail; a NULL watermark fails
+  IF iit.snapshot_contains_changes('00000000-0000-4000-8000-0000000000e5', 6, ARRAY[9223372036854775807::bigint]) NOT LIKE '0 of 1 listed history ids exist' THEN RAISE EXCEPTION 'W5v missing id accepted'; END IF;
+  SELECT m.history_ids || ARRAY[9223372036854775806::bigint] INTO ids FROM iit.material_corrections m JOIN iit.audit_holds ah ON ah.correction_id = m.id WHERE ah.id = h3;
+  IF iit.snapshot_contains_changes('00000000-0000-4000-8000-0000000000e5', 6, ids) NOT LIKE '1 of 2 listed history ids exist' THEN RAISE EXCEPTION 'W5w partially missing list accepted'; END IF;
+  IF iit.snapshot_contains_changes('00000000-0000-4000-8000-0000000000e5', 6, ARRAY[NULL::bigint]) <> 'correction lists a NULL history id' THEN RAISE EXCEPTION 'W5x NULL id accepted'; END IF;
+  -- a changed column outside the allowlist fails even when its new value is NULL (fc_id: deals.final_closure_at cleared before v6's watermark)
+  IF iit.snapshot_contains_changes('00000000-0000-4000-8000-0000000000e5', 6, ARRAY[fc_id]) NOT LIKE '%deals.final_closure_at is not in the snapshot allowlist' THEN RAISE EXCEPTION 'W5y null-valued unknown column accepted'; END IF;
+  -- NULL watermark: a direct release row without one cannot be a rebind target
+  INSERT INTO iit.deal_versions(deal_id, version_no, status, cause, released_at, snapshot) VALUES ('00000000-0000-4000-8000-0000000000e8', 8, 'released', 'intake', now(), '{}');
+  IF iit.snapshot_contains_changes('00000000-0000-4000-8000-0000000000e8', 8, ARRAY[(SELECT min(id) FROM iit.record_history)]) <> 'v8 has no history watermark' THEN RAISE EXCEPTION 'W5z NULL watermark accepted'; END IF;
+  UPDATE iit.deal_versions SET status = 'superseded' WHERE deal_id='00000000-0000-4000-8000-0000000000e8' AND version_no = 8;
 END $$;
 
 -- W6 consignment release (G8/G13/G14): no price, consignor + buyer + closer required; skip_audit → no attempt; then cancellation (G12, invariant 43)
@@ -223,7 +245,9 @@ DO $$ DECLARE v int; p uuid; hold uuid; msg text; BEGIN
   INSERT INTO iit.deal_versions(deal_id, version_no, status, cause) VALUES ('00000000-0000-4000-8000-0000000000e6', 2, 'draft', 'resubmission');   -- direct write, to show release still refuses
   BEGIN PERFORM iit.release_deal('00000000-0000-4000-8000-0000000000e6','b44-de'); RAISE EXCEPTION 'W6l released after cancel'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'RELEASE_REFUSED: % cancelled or voided' THEN RAISE; END IF; END;
   BEGIN PERFORM iit.rebind_hold(hold, 'x', 'b44-lead'); RAISE EXCEPTION 'W6m cancel hold rebound'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'REBIND_REFUSED: only material_correction holds rebind%' THEN RAISE; END IF; END;
-  BEGIN UPDATE iit.audit_holds SET released_at = now(), released_by_decision_id = (SELECT id FROM iit.audit_decisions LIMIT 1) WHERE id = hold; RAISE EXCEPTION 'W6n cancel hold released'; EXCEPTION WHEN OTHERS THEN NULL; END;
+  BEGIN UPDATE iit.audit_holds SET released_at = now(), released_by_decision_id = (SELECT id FROM iit.audit_decisions LIMIT 1) WHERE id = hold; RAISE EXCEPTION 'W6n cancel hold released';
+  EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'HOLD_RELEASE_UNBOUND%' AND SQLSTATE <> '23514' THEN RAISE; END IF; END;
+  IF (SELECT released_at FROM iit.audit_holds WHERE id = hold) IS NOT NULL THEN RAISE EXCEPTION 'W6n2 cancel hold is released'; END IF;
 END $$;
 
 -- W7 VIN correction on a shared vehicle (D-22), VIN collision, and the requirement-key change it causes; open episode ended by cancellation
@@ -251,12 +275,19 @@ END $$;
 
 -- W8 requirement-key change through a material correction on a vAuto deal: title FL → OK drops FL_DMV, adds OK_DMV; the old validation does not carry
 DO $$ DECLARE corr uuid; keys text; BEGIN
+  corr := iit.correct_field('00000000-0000-4000-8000-0000000000e5','lienholder_name_raw','"Other Bank"','lender re-read','b44-de');
+  IF (SELECT lienholder_name_raw FROM iit.deal_liens WHERE deal_id='00000000-0000-4000-8000-0000000000e5') <> 'Other Bank' OR (SELECT count(*) FROM iit.audit_holds WHERE correction_id = corr AND released_at IS NULL) <> 1 THEN RAISE EXCEPTION 'W8-0 raw lienholder correction'; END IF;
   corr := iit.correct_field('00000000-0000-4000-8000-0000000000e5','title_state','"OK"','title re-read','b44-de');
   SELECT string_agg(requirement_key, ',' ORDER BY requirement_key) INTO keys FROM iit.deal_report_requirements WHERE deal_id='00000000-0000-4000-8000-0000000000e5' AND version_no = iit.open_draft_version('00000000-0000-4000-8000-0000000000e5');
   IF keys <> 'OK_DMV:WAUZZZ8V7JA000001' THEN RAISE EXCEPTION 'W8a keys after title change: %', keys; END IF;
   IF iit.requirements_all_satisfied('00000000-0000-4000-8000-0000000000e5', iit.open_draft_version('00000000-0000-4000-8000-0000000000e5')) THEN RAISE EXCEPTION 'W8b OK_DMV satisfied by an FL validation'; END IF;
   BEGIN PERFORM iit.release_deal('00000000-0000-4000-8000-0000000000e5','b44-de'); RAISE EXCEPTION 'W8c released without OK_DMV'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'RELEASE_REFUSED: % unsatisfied report requirements' THEN RAISE; END IF; END;
 END $$;
+
+-- fixtures for 003_concurrency_test.sh (CONC-2): two deal-less open items assigned to data_entry
+INSERT INTO iit.work_items(id, kind, assigned_role, detail) VALUES
+  ('00000000-0000-4000-8000-00000000c0a1','lienholder_unmatched','data_entry','{"note":"CONC-2a"}'),
+  ('00000000-0000-4000-8000-00000000c0a2','lienholder_unmatched','data_entry','{"note":"CONC-2b"}');
 
 -- W9 grants: staff functions → iit_integration only; helpers owner-only
 DO $$ BEGIN

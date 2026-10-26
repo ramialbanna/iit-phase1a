@@ -19,6 +19,10 @@ CREATE TABLE iit.legacy_31_fields (
 );
 SELECT iit.attach_history('iit.legacy_31_fields', 'field', true);
 
+-- D21 "lienholder" covers the lender's identity whether matched (lienholder_org_id) or still raw (lienholder_name_raw): a raw-name
+-- change on an unmatched lien changes the lender and must open a draft + hold, never pass as an amendment (Codex 003 rev-1 finding 3).
+INSERT INTO iit.material_fields VALUES ('lienholder_name_raw', 'D21 lienholder — raw name while unmatched (003)');
+
 -- deal_version_snapshot allowlist (§7: values of allowlisted columns only; §5.5 "the intake values as released").
 -- Keys are the SOURCE COLUMN NAMES so that a record_history row can be checked against the snapshot mechanically (rebind proof).
 -- Sections: deal, vehicle, title, lien, parties[], consignment, requirements[]. PROPOSAL — docs/migrations/003.md D-18.
@@ -96,18 +100,28 @@ CREATE FUNCTION iit.missing_required_facts(p_deal uuid) RETURNS text[] LANGUAGE 
     FROM iit.required_fact_rules r JOIN facts f ON f.fact = r.fact
    WHERE r.origin = (SELECT origin FROM d) AND r.required AND NOT coalesce(f.present, false) $$;
 
--- Containment proof for rebinding (§5.7a G4): every record_history row listed in the correction is (a) covered by the target
--- version's watermark and (b) its changed columns appear in the target snapshot with the SAME values. Returns NULL when the
--- proof holds, else the reason it fails. Columns outside the snapshot allowlist cannot be proven → fail closed.
+-- Containment proof for rebinding (§5.7a G4): EVERY record_history row listed in the correction must exist, be (a) covered by
+-- the target version's (non-NULL) watermark and (b) have its changed columns in the target snapshot with the SAME values.
+-- Returns NULL when the proof holds, else the reason it fails. A changed column that is not in the snapshot allowlist
+-- (json_schemas.deal_version_snapshot) cannot be proven → fail closed, even when its new value is NULL; an absent key may
+-- stand for NULL only for an allowlisted column (Codex 003 rev-1 finding 1).
 CREATE FUNCTION iit.snapshot_contains_changes(p_deal uuid, p_version int, p_history_ids bigint[]) RETURNS text LANGUAGE plpgsql STABLE SET search_path = '' AS $$
-DECLARE v_snap jsonb; v_wm bigint; h record; v_section jsonb; k text; v_after jsonb; v_changed text[];
+DECLARE v_snap jsonb; v_wm bigint; h record; v_section jsonb; v_allowed jsonb; v_schema jsonb; k text; v_after jsonb; v_changed text[]; v_found int; v_section_name text;
 BEGIN
   SELECT snapshot, history_watermark INTO v_snap, v_wm FROM iit.deal_versions WHERE deal_id = p_deal AND version_no = p_version AND status = 'released';
   IF v_snap IS NULL THEN RETURN 'target version is not released'; END IF;
+  IF v_wm IS NULL THEN RETURN pg_catalog.format('v%s has no history watermark', p_version); END IF;
   IF p_history_ids IS NULL OR pg_catalog.cardinality(p_history_ids) = 0 THEN RETURN 'correction lists no history rows'; END IF;
+  IF pg_catalog.array_position(p_history_ids, NULL) IS NOT NULL THEN RETURN 'correction lists a NULL history id'; END IF;
+  SELECT count(*) INTO v_found FROM iit.record_history WHERE id = ANY (p_history_ids);
+  IF v_found <> (SELECT count(DISTINCT x) FROM pg_catalog.unnest(p_history_ids) x) THEN RETURN pg_catalog.format('%s of %s listed history ids exist', v_found, pg_catalog.cardinality(p_history_ids)); END IF;
+  SELECT schema INTO v_schema FROM iit.json_schemas WHERE name = 'deal_version_snapshot';
   FOR h IN SELECT * FROM iit.record_history WHERE id = ANY (p_history_ids) ORDER BY id LOOP
     IF h.id > v_wm THEN RETURN pg_catalog.format('history %s is after the watermark %s of v%s', h.id, v_wm, p_version); END IF;
     IF h.op = 'D' THEN RETURN pg_catalog.format('history %s is a delete', h.id); END IF;
+    v_section_name := CASE h.table_name WHEN 'deals' THEN 'deal' WHEN 'vehicles' THEN 'vehicle' WHEN 'deal_titles' THEN 'title' WHEN 'deal_liens' THEN 'lien'
+                                        WHEN 'deal_parties' THEN 'parties' WHEN 'seller_parties' THEN 'parties' END;
+    v_allowed := v_schema -> v_section_name;
     v_section := CASE h.table_name
       WHEN 'deals'        THEN v_snap -> 'deal'
       WHEN 'vehicles'     THEN v_snap -> 'vehicle'
@@ -124,8 +138,8 @@ BEGIN
      WHERE h.before IS NULL OR (h.before -> a.key) IS DISTINCT FROM a.value;
     FOREACH k IN ARRAY coalesce(v_changed, '{}'::text[]) LOOP
       v_after := h.after -> k;
-      IF NOT (v_section ? k) AND v_after <> 'null'::jsonb THEN
-        RETURN pg_catalog.format('history %s: column %s.%s is not in the v%s snapshot', h.id, h.table_name, k, p_version); END IF;
+      IF v_allowed IS NULL OR NOT (v_allowed ? k) THEN
+        RETURN pg_catalog.format('history %s: column %s.%s is not in the snapshot allowlist', h.id, h.table_name, k); END IF;
       IF coalesce(v_section -> k, 'null'::jsonb) IS DISTINCT FROM v_after THEN
         RETURN pg_catalog.format('history %s: %s.%s = %s in the change, %s in snapshot v%s', h.id, h.table_name, k, v_after, coalesce(v_section -> k, 'null'::jsonb), p_version); END IF;
     END LOOP;
@@ -240,8 +254,13 @@ BEGIN
   SELECT * INTO ch FROM iit.source_channels WHERE name = p_channel_name AND active;
   IF ch IS NULL THEN PERFORM iit.actor_restore(v_prev); RAISE EXCEPTION 'CHANNEL_UNKNOWN: %', p_channel_name; END IF;
   IF ch.origin <> d.origin THEN PERFORM iit.actor_restore(v_prev); RAISE EXCEPTION 'CHANNEL_ORIGIN_MISMATCH: % is a % channel, deal origin is %', p_channel_name, ch.origin, d.origin; END IF;
-  IF iit.latest_released_version(p_deal) IS NOT NULL AND d.source_channel_id IS DISTINCT FROM ch.id THEN
-    PERFORM iit.actor_restore(v_prev); RAISE EXCEPTION 'SOURCE_CHANGE_AFTER_RELEASE_UNDECIDED: R2/D-5 is an open owner decision; the Source of a released deal cannot change through this function'; END IF;
+  IF iit.latest_released_version(p_deal) IS NOT NULL THEN
+    IF d.source_channel_id IS DISTINCT FROM ch.id THEN
+      PERFORM iit.actor_restore(v_prev); RAISE EXCEPTION 'SOURCE_CHANGE_AFTER_RELEASE_UNDECIDED: R2/D-5 is an open owner decision; the Source of a released deal cannot change through this function'; END IF;
+    IF d.consumer_route IS DISTINCT FROM ch.route THEN
+      PERFORM iit.actor_restore(v_prev); RAISE EXCEPTION 'ROUTE_CHANGED_AFTER_RELEASE: channel % now routes %, deal % was released on %; re-routing a released deal is not a reviewed workflow (D-5)', ch.name, ch.route, p_deal, d.consumer_route; END IF;
+    PERFORM iit.actor_restore(v_prev); RETURN;                                           -- same channel, same route: genuine no-op, nothing written
+  END IF;
   UPDATE iit.deals SET source_channel_id = ch.id, consumer_route = ch.route WHERE id = p_deal;    -- cache rule D-9: one statement, one writer
   INSERT INTO iit.activity_events(deal_id, entity_type, entity_id, action, after, actor_id, actor_kind, source)
     VALUES (p_deal, 'deal', p_deal, 'source_channel_set', pg_catalog.jsonb_build_object('channel', ch.name), v_actor, 'user', 'data_entry_ui');
@@ -431,18 +450,22 @@ END $$;
 -- (restart_new_episode / no_restart, §5.3) create Deals and episodes and belong to the intake slice (004).
 CREATE FUNCTION iit.resolve_work_item(p_item uuid, p_outcome text, p_actor_base44_user_id text) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
-DECLARE v_actor uuid; v_prev iit.actor_ctx; w record;
+DECLARE v_actor uuid; v_prev iit.actor_ctx; w record; v_deal uuid; n int;
 BEGIN
-  SELECT * INTO w FROM iit.work_items WHERE id = p_item;
-  IF w IS NULL THEN RAISE EXCEPTION 'WORK_ITEM_UNKNOWN: %', p_item; END IF;
-  v_actor := iit.require_role(p_actor_base44_user_id, w.assigned_role);
+  -- lock order everywhere in iit: Deal row first (when the item has one), then the item row; then authorize against the
+  -- item's CURRENT assignment (Codex 003 rev-1 finding 2). The first lookup only finds the Deal.
+  SELECT deal_id INTO v_deal FROM iit.work_items WHERE id = p_item;
+  IF NOT FOUND THEN RAISE EXCEPTION 'WORK_ITEM_UNKNOWN: %', p_item; END IF;
+  IF p_outcome IS NULL OR pg_catalog.btrim(p_outcome) = '' THEN RAISE EXCEPTION 'REASON_REQUIRED'; END IF;
+  IF v_deal IS NOT NULL THEN PERFORM 1 FROM iit.deals WHERE id = v_deal FOR UPDATE; END IF;
+  SELECT * INTO w FROM iit.work_items WHERE id = p_item FOR UPDATE;
+  v_actor := iit.require_role(p_actor_base44_user_id, w.assigned_role);                  -- current assignment, under the lock
   v_prev := iit.actor_push(v_actor, 'user');
-  IF p_outcome IS NULL OR pg_catalog.btrim(p_outcome) = '' THEN PERFORM iit.actor_restore(v_prev); RAISE EXCEPTION 'REASON_REQUIRED'; END IF;
-  IF w.deal_id IS NOT NULL THEN PERFORM 1 FROM iit.deals WHERE id = w.deal_id FOR UPDATE; END IF;
-  SELECT * INTO w FROM iit.work_items WHERE id = p_item;
   IF w.status <> 'open' THEN PERFORM iit.actor_restore(v_prev); RAISE EXCEPTION 'WORK_ITEM_NOT_OPEN: %', p_item; END IF;
   IF w.kind = 'restart_candidate' THEN PERFORM iit.actor_restore(v_prev); RAISE EXCEPTION 'WORK_ITEM_KIND_DEFERRED: restart decisions arrive with the intake slice (004)'; END IF;
-  UPDATE iit.work_items SET status = 'closed', closed_by = v_actor, closed_at = now(), outcome = p_outcome WHERE id = p_item;
+  UPDATE iit.work_items SET status = 'closed', closed_by = v_actor, closed_at = now(), outcome = p_outcome WHERE id = p_item AND status = 'open';
+  GET DIAGNOSTICS n = ROW_COUNT;
+  IF n <> 1 THEN PERFORM iit.actor_restore(v_prev); RAISE EXCEPTION 'WORK_ITEM_NOT_OPEN: %', p_item; END IF;   -- exactly one open→closed transition
   INSERT INTO iit.activity_events(deal_id, entity_type, entity_id, action, after, actor_id, actor_kind, source)
     VALUES (w.deal_id, 'work_item', p_item, 'work_item_closed', pg_catalog.jsonb_build_object('outcome', p_outcome), v_actor, 'user', 'data_entry_ui');
   PERFORM iit.actor_restore(v_prev);
