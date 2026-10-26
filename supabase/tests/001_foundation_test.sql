@@ -112,6 +112,10 @@ END $$;
 DO $$ BEGIN
   BEGIN UPDATE iit.deal_versions SET status='released', released_at=now(), released_by='00000000-0000-4000-8000-00000000000d', snapshot='{"purchase_price":1}'::jsonb, history_watermark=1
     WHERE deal_id='00000000-0000-4000-8000-0000000000e2' AND version_no=1; RAISE EXCEPTION 'T10i non-empty snapshot accepted while its allowlist is undecided'; EXCEPTION WHEN check_violation THEN NULL; END;
+  BEGIN UPDATE iit.deal_versions SET status='released', released_at=now(), released_by='00000000-0000-4000-8000-00000000000d', snapshot='null'::jsonb, history_watermark=1
+    WHERE deal_id='00000000-0000-4000-8000-0000000000e2' AND version_no=1; RAISE EXCEPTION 'T10j JSON-null snapshot accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+  -- SQL NULL snapshot on a draft is legitimate (table CHECK requires it) and passes the policy trigger
+  UPDATE iit.deal_versions SET snapshot = NULL WHERE deal_id='00000000-0000-4000-8000-0000000000e2' AND version_no=1;
 END $$;
 UPDATE iit.deal_versions SET status='released', released_at=now(), released_by='00000000-0000-4000-8000-00000000000d', snapshot='{}'::jsonb, history_watermark=1
   WHERE deal_id='00000000-0000-4000-8000-0000000000e2' AND version_no=1;
@@ -142,12 +146,18 @@ DO $$ DECLARE r uuid; n int; BEGIN
   BEGIN INSERT INTO iit.vauto_observations(appraisal_ref_id, body, body_hash) VALUES (r, '{"lien":{"accountNumber":"1"}}', 'h4'); RAISE EXCEPTION 'T12c accountNumber accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
   BEGIN INSERT INTO iit.vauto_observations(appraisal_ref_id, body, body_hash) VALUES (r, '{"customer":{"address":"1 st"}}', 'h5'); RAISE EXCEPTION 'T12d customer.address accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
   BEGIN INSERT INTO iit.vauto_observations(appraisal_ref_id, body, body_hash) VALUES (r, '{"vehicle":"not an object"}', 'h6'); RAISE EXCEPTION 'T12e scalar where structure expected accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+  -- rev 3: object/array beneath a scalar leaf rejected; scalars accepted; JSON null body rejected
+  BEGIN INSERT INTO iit.vauto_observations(appraisal_ref_id, body, body_hash) VALUES (r, '{"vehicle":{"vin":{"accountNumber":"123"}}}', 'h7'); RAISE EXCEPTION 'T12i object under scalar leaf accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+  BEGIN INSERT INTO iit.vauto_observations(appraisal_ref_id, body, body_hash) VALUES (r, '{"vehicle":{"vin":["a","b"]}}', 'h8'); RAISE EXCEPTION 'T12j array under scalar leaf accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+  BEGIN INSERT INTO iit.vauto_observations(appraisal_ref_id, body, body_hash) VALUES (r, 'null'::jsonb, 'h9'); RAISE EXCEPTION 'T12k JSON null body accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+  BEGIN INSERT INTO iit.vauto_observations(appraisal_ref_id, body, body_hash) VALUES (r, '[]'::jsonb, 'h10'); RAISE EXCEPTION 'T12l array body accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
   -- consecutive duplicate (same hash as the latest) is suppressed
   BEGIN INSERT INTO iit.vauto_observations(appraisal_ref_id, body, body_hash) VALUES (r, '{"vehicle":{"vin":"X","year":2019},"lien":{"owner":"Bank"}}', 'hA'); RAISE EXCEPTION 'T12f consecutive duplicate accepted'; EXCEPTION WHEN unique_violation THEN NULL; END;
   -- A -> B -> A: the return to A is recorded
   INSERT INTO iit.vauto_observations(appraisal_ref_id, body, body_hash) VALUES (r, '{"vehicle":{"vin":"X","year":2020}}', 'hB');
   INSERT INTO iit.vauto_observations(appraisal_ref_id, body, body_hash) VALUES (r, '{"vehicle":{"vin":"X","year":2019},"lien":{"owner":"Bank"}}', 'hA');
-  SELECT count(*) INTO n FROM iit.vauto_observations WHERE appraisal_ref_id = r; IF n <> 3 THEN RAISE EXCEPTION 'T12g expected 3 observations (A,B,A), got %', n; END IF;
+  INSERT INTO iit.vauto_observations(appraisal_ref_id, body, body_hash) VALUES (r, '{"vehicle":{"vin":"Y","year":2021,"mileage":null},"appraisal":{"is_completed":true},"notes_sanitized":{"labels":[{"label":"Deposit","value":"500"}]}}', 'hScalars');  -- valid scalars (incl. null) + array-of-objects with schema
+  SELECT count(*) INTO n FROM iit.vauto_observations WHERE appraisal_ref_id = r; IF n <> 4 THEN RAISE EXCEPTION 'T12g expected 4 observations (A,B,A,scalars), got %', n; END IF;
   BEGIN UPDATE iit.vauto_observations SET body_hash='z' WHERE body_hash='hB'; RAISE EXCEPTION 'T12h observation mutated'; EXCEPTION WHEN SQLSTATE '42501' THEN NULL; END;
 END $$;
 
@@ -156,6 +166,7 @@ DO $$ DECLARE s1 uuid; s2 uuid; o1 uuid; BEGIN
   SELECT id INTO s1 FROM iit.source_records WHERE deal_id='00000000-0000-4000-8000-0000000000e2' AND kind='initial';
   INSERT INTO iit.source_records(kind, created_via) VALUES ('cutover_legacy','cutover') RETURNING id INTO s2;
   BEGIN INSERT INTO iit.source_observations(source_record_id, body, body_hash) VALUES (s1, '{"Deal Status":"In-Progress"}', 'o1'); RAISE EXCEPTION 'T12x-a non-empty 3.1 body accepted while allowlist is empty'; EXCEPTION WHEN check_violation THEN NULL; END;
+  BEGIN INSERT INTO iit.source_observations(source_record_id, body, body_hash) VALUES (s2, 'null'::jsonb, 'o-null'); RAISE EXCEPTION 'T12x-c JSON null 3.1 body accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
   INSERT INTO iit.source_observations(source_record_id, body, body_hash) VALUES (s2, '{}', 'o-empty') RETURNING id INTO o1;
   BEGIN UPDATE iit.source_records SET current_observation_id = o1 WHERE id = s1; RAISE EXCEPTION 'T12x-b observation of another record accepted as current'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
   UPDATE iit.source_records SET current_observation_id = o1 WHERE id = s2;   -- own observation: accepted

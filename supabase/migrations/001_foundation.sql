@@ -223,16 +223,35 @@ BEGIN
       ELSIF pg_catalog.jsonb_typeof(v) = 'array' THEN                          -- array of objects: each element must match
         IF EXISTS (SELECT 1 FROM pg_catalog.jsonb_array_elements(v) e WHERE pg_catalog.jsonb_typeof(e) <> 'object' OR NOT iit.json_matches_schema(e, sv)) THEN RETURN false; END IF;
       ELSE RETURN false; END IF;                                               -- schema expects a structure, body has a scalar
-    ELSIF sv <> 'true'::jsonb THEN RETURN false; END IF;
+    ELSIF sv = 'true'::jsonb THEN
+      -- a leaf admits SCALARS only (string/number/boolean/null); objects and arrays need an explicit schema (Codex rev-2 finding 1)
+      IF pg_catalog.jsonb_typeof(v) NOT IN ('string','number','boolean','null') THEN RETURN false; END IF;
+    ELSE RETURN false; END IF;
   END LOOP;
   RETURN true;
+END $$;
+-- helper: is record column <name> SQL NULL? (to_jsonb cannot tell SQL NULL from JSON null; jsonb_populate/`$1.col` can)
+CREATE FUNCTION iit._column_is_sql_null(p_row anyelement, p_col text) RETURNS boolean LANGUAGE plpgsql IMMUTABLE SET search_path = '' AS $$
+DECLARE v boolean;
+BEGIN
+  EXECUTE pg_catalog.format('SELECT ($1).%I IS NULL', p_col) INTO v USING p_row;
+  RETURN v;
 END $$;
 -- generic BEFORE trigger: iit.enforce_json(<column>, <schema name>) — raises STORAGE_POLICY on any non-allowlisted key
 CREATE FUNCTION iit.enforce_json() RETURNS trigger LANGUAGE plpgsql SET search_path = '' AS $$
 DECLARE v_body jsonb; v_schema jsonb;
 BEGIN
   v_body := pg_catalog.to_jsonb(NEW) -> TG_ARGV[0];
-  IF v_body IS NULL OR v_body = 'null'::jsonb THEN RETURN NEW; END IF;         -- NULL column is fine; NOT NULL is the table's job
+  -- to_jsonb(NEW) renders a SQL NULL column as JSON null, so re-check the column itself: SQL NULL is allowed where the table allows
+  -- it (e.g. a draft snapshot); a stored JSON 'null' is NOT an object and is rejected (Codex rev-2 finding 2).
+  IF v_body IS NULL THEN RETURN NEW; END IF;
+  IF v_body = 'null'::jsonb THEN
+    IF (pg_catalog.to_jsonb(NEW) ? TG_ARGV[0]) AND iit._column_is_sql_null(NEW, TG_ARGV[0]) THEN RETURN NEW; END IF;
+    RAISE EXCEPTION 'STORAGE_POLICY: %.% is JSON null; a body must be an object', TG_TABLE_NAME, TG_ARGV[0] USING ERRCODE = '23514';
+  END IF;
+  IF pg_catalog.jsonb_typeof(v_body) <> 'object' THEN
+    RAISE EXCEPTION 'STORAGE_POLICY: %.% must be a JSON object (got %)', TG_TABLE_NAME, TG_ARGV[0], pg_catalog.jsonb_typeof(v_body) USING ERRCODE = '23514';
+  END IF;
   SELECT schema INTO v_schema FROM iit.json_schemas WHERE name = TG_ARGV[1];
   IF v_schema IS NULL THEN RAISE EXCEPTION 'STORAGE_POLICY: no allowlist % for %.%', TG_ARGV[1], TG_TABLE_NAME, TG_ARGV[0] USING ERRCODE = '23514'; END IF;
   IF NOT iit.json_matches_schema(v_body, v_schema) THEN
