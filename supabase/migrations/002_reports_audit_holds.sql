@@ -63,6 +63,20 @@ CREATE TABLE iit.deal_report_requirements (    -- derived for the DRAFT, frozen 
   CHECK ((subject_type = 'vehicle') = (subject_vin IS NOT NULL)), CHECK ((subject_type = 'organization') = (subject_org_id IS NOT NULL))
 );
 SELECT iit.attach_history('iit.deal_report_requirements', 'id', true);   -- recomputation on a draft removes/adds rows; every change recorded
+-- requirement rows may change only while their version is a DRAFT (Codex 002 finding 4); the composite FK gives ownership, this gives immutability
+CREATE FUNCTION iit.requirements_frozen_guard() RETURNS trigger LANGUAGE plpgsql SET search_path = '' AS $$
+DECLARE v_status text; r record;
+BEGIN
+  r := CASE TG_OP WHEN 'DELETE' THEN OLD ELSE NEW END;
+  SELECT status INTO v_status FROM iit.deal_versions WHERE deal_id = r.deal_id AND version_no = r.version_no;
+  IF v_status IS DISTINCT FROM 'draft' THEN RAISE EXCEPTION 'REQUIREMENTS_FROZEN: % on v% of deal % (%)', TG_OP, r.version_no, r.deal_id, coalesce(v_status, 'no version'); END IF;
+  IF TG_OP = 'UPDATE' AND (NEW.deal_id <> OLD.deal_id OR NEW.version_no <> OLD.version_no) THEN
+    SELECT status INTO v_status FROM iit.deal_versions WHERE deal_id = NEW.deal_id AND version_no = NEW.version_no;
+    IF v_status IS DISTINCT FROM 'draft' THEN RAISE EXCEPTION 'REQUIREMENTS_FROZEN: cannot move a requirement onto a non-draft version'; END IF;
+  END IF;
+  RETURN COALESCE(NEW, OLD);
+END $$;
+CREATE TRIGGER requirements_frozen BEFORE INSERT OR UPDATE OR DELETE ON iit.deal_report_requirements FOR EACH ROW EXECUTE FUNCTION iit.requirements_frozen_guard();
 
 CREATE TABLE iit.report_validations (          -- append-only; authoritative = highest id per (report, requirement_key, version)
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -112,6 +126,9 @@ CREATE TABLE iit.prequalification_checks (     -- one row = one Risk Audit attem
   FOREIGN KEY (deal_id, deal_version_no) REFERENCES iit.deal_versions(deal_id, version_no)
 );
 CREATE UNIQUE INDEX one_open_check_per_deal ON iit.prequalification_checks (deal_id) WHERE status = 'open';
+-- exactly one CURRENT attempt (open or decided) per deal: a newer attempt supersedes every earlier one (Codex 002 finding 2)
+CREATE UNIQUE INDEX one_current_check_per_deal ON iit.prequalification_checks (deal_id) WHERE status <> 'superseded';
+ALTER TABLE iit.prequalification_checks ADD CONSTRAINT prequalification_checks_id_deal_version_uq UNIQUE (id, deal_id, deal_version_no);
 SELECT iit.attach_history('iit.prequalification_checks');
 
 CREATE TABLE iit.audit_decisions (             -- append-only (T49)
@@ -123,7 +140,9 @@ CREATE TABLE iit.audit_decisions (             -- append-only (T49)
 );
 SELECT iit.make_append_only('iit.audit_decisions');
 
-CREATE TABLE iit.audit_holds (                 -- §5.7a DDL + released_at/by cache maintained only by release_hold_by_decision
+ALTER TABLE iit.material_corrections ADD CONSTRAINT material_corrections_id_deal_draft_uq UNIQUE (id, deal_id, draft_version_no);
+ALTER TABLE iit.audit_decisions ADD CONSTRAINT audit_decisions_id_check_uq UNIQUE (id, check_id);
+CREATE TABLE iit.audit_holds (                 -- §5.7a DDL + released_at/by cache maintained only by record_decision
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   deal_id uuid NOT NULL REFERENCES iit.deals(id),
   cause text NOT NULL CHECK (cause IN ('material_correction','reaudit_request','cancel','cutover_unresolved')),
@@ -136,7 +155,11 @@ CREATE TABLE iit.audit_holds (                 -- §5.7a DDL + released_at/by ca
   CHECK (cause <> 'material_correction' OR (correction_id IS NOT NULL AND covers_version_no IS NOT NULL)),
   CHECK (cause <> 'cutover_unresolved' OR reconciliation_item_id IS NOT NULL),
   CHECK ((released_at IS NULL) = (released_by_decision_id IS NULL)),
-  CHECK (cause <> 'cancel' OR released_at IS NULL)                      -- G12: a cancel hold is never released
+  CHECK (cause <> 'cancel' OR released_at IS NULL),                     -- G12: a cancel hold is never released
+  -- same-deal / same-version relationships (Codex 002 finding 5); NULLs (unbound holds) are allowed by MATCH SIMPLE
+  CONSTRAINT audit_holds_correction_same_deal_fk FOREIGN KEY (correction_id, deal_id, covers_version_no) REFERENCES iit.material_corrections(id, deal_id, draft_version_no),
+  CONSTRAINT audit_holds_check_same_deal_fk FOREIGN KEY (covering_check_id, deal_id, covers_version_no) REFERENCES iit.prequalification_checks(id, deal_id, deal_version_no),
+  CONSTRAINT audit_holds_release_on_covering_check_fk FOREIGN KEY (released_by_decision_id, covering_check_id) REFERENCES iit.audit_decisions(id, check_id)
 );
 CREATE INDEX audit_holds_open_idx ON iit.audit_holds (deal_id) WHERE released_at IS NULL;
 SELECT iit.attach_history('iit.audit_holds');
@@ -156,6 +179,12 @@ BEGIN
     RAISE EXCEPTION 'HOLD_RELEASE_IMMUTABLE: hold % was already released', OLD.id; END IF;
   IF NEW.deal_id <> OLD.deal_id OR NEW.cause <> OLD.cause OR NEW.correction_id IS DISTINCT FROM OLD.correction_id OR NEW.opened_at <> OLD.opened_at OR NEW.opened_by <> OLD.opened_by THEN
     RAISE EXCEPTION 'HOLD_IMMUTABLE: identity fields of hold % cannot change', OLD.id; END IF;
+  -- a release must cite an APPROVED decision on exactly the covering check (the FK guarantees the check; this guarantees the value)
+  IF NEW.released_by_decision_id IS NOT NULL AND OLD.released_by_decision_id IS NULL THEN
+    IF NEW.covering_check_id IS NULL THEN RAISE EXCEPTION 'HOLD_RELEASE_UNBOUND: hold % has no covering check', OLD.id; END IF;
+    IF NOT EXISTS (SELECT 1 FROM iit.audit_decisions d WHERE d.id = NEW.released_by_decision_id AND d.check_id = NEW.covering_check_id AND d.decision = 'approved') THEN
+      RAISE EXCEPTION 'HOLD_RELEASE_INVALID: decision % is not an approved decision on covering check %', NEW.released_by_decision_id, NEW.covering_check_id; END IF;
+  END IF;
   RETURN NEW;
 END $$;
 CREATE TRIGGER audit_holds_guard BEFORE UPDATE ON iit.audit_holds FOR EACH ROW EXECUTE FUNCTION iit.audit_holds_guard();
@@ -216,6 +245,8 @@ BEGIN
     SELECT 1 FROM iit.external_vehicle_reports rep
      LEFT JOIN iit.vehicles v ON v.id = rep.vehicle_id
      WHERE rep.deal_id = p_deal
+       AND rep.report_type = r.report_type                                                                       -- qualification (Codex 002 finding 3)
+       AND (rep.acquisition <> 'manual_upload' OR rep.file_recorded_at IS NOT NULL)                              -- an unfinished upload is not a report
        AND NOT EXISTS (SELECT 1 FROM iit.external_vehicle_reports x WHERE x.replaces_report_id = rep.id)        -- not replaced
        AND rep.subject_type = r.subject_type
        AND ((r.subject_type = 'vehicle' AND v.vin_normalized = r.subject_vin) OR (r.subject_type = 'organization' AND rep.subject_org_id = r.subject_org_id))
@@ -228,12 +259,15 @@ END $$;
 CREATE FUNCTION iit.requirements_all_satisfied(p_deal uuid, p_version int) RETURNS boolean LANGUAGE sql STABLE SET search_path = '' AS $$
   SELECT NOT EXISTS (SELECT 1 FROM iit.deal_report_requirements q WHERE q.deal_id = p_deal AND q.version_no = p_version AND NOT iit.requirement_satisfied(p_deal, p_version, q.requirement_key)) $$;
 
--- §5.5 approval eligibility: latest decision on the attempt for the latest released version is 'approved' and no open material draft
+-- §5.5 approval eligibility: THE current attempt (the single non-superseded check) is for the latest released version, its latest
+-- decision is 'approved', and no material draft is open. A newer attempt supersedes any earlier approval (Codex 002 finding 2).
+CREATE FUNCTION iit.current_attempt(p_deal uuid) RETURNS uuid LANGUAGE sql STABLE SET search_path = '' AS $$
+  SELECT id FROM iit.prequalification_checks WHERE deal_id = p_deal AND status <> 'superseded' $$;
 CREATE FUNCTION iit.approval_eligible(p_deal uuid) RETURNS boolean LANGUAGE sql STABLE SET search_path = '' AS $$
-  SELECT EXISTS (
-    SELECT 1 FROM iit.prequalification_checks c
-     WHERE c.deal_id = p_deal AND c.deal_version_no = iit.latest_released_version(p_deal) AND c.status <> 'superseded'
-       AND (SELECT d.decision FROM iit.audit_decisions d WHERE d.check_id = c.id ORDER BY d.seq DESC LIMIT 1) = 'approved')
+  SELECT coalesce((
+    SELECT c.deal_version_no = iit.latest_released_version(p_deal)
+       AND (SELECT d.decision FROM iit.audit_decisions d WHERE d.check_id = c.id ORDER BY d.seq DESC LIMIT 1) = 'approved'
+      FROM iit.prequalification_checks c WHERE c.id = iit.current_attempt(p_deal)), false)
   AND NOT iit.open_material_draft_exists(p_deal) $$;
 
 -- carry-over of authoritative valid validations from version N to draft N+1 (§5.6): same key, same subject, still fresh; never creates requirements
@@ -281,7 +315,7 @@ BEGIN
   PERFORM 1 FROM iit.deals WHERE id = p_deal FOR UPDATE;
   v_ver := iit.latest_released_version(p_deal);
   IF v_ver IS NULL THEN RAISE EXCEPTION 'NO_RELEASED_VERSION: deal % has no released version to audit', p_deal; END IF;
-  UPDATE iit.prequalification_checks SET status = 'superseded' WHERE deal_id = p_deal AND status = 'open';
+  UPDATE iit.prequalification_checks SET status = 'superseded' WHERE deal_id = p_deal AND status <> 'superseded';   -- the new attempt is the only current one
   INSERT INTO iit.prequalification_checks(deal_id, deal_version_no, opened_by, reopened_from_check_id) VALUES (p_deal, v_ver, p_actor, p_reopened_from) RETURNING id INTO v_check;
   UPDATE iit.deals SET audit_status = 'pending' WHERE id = p_deal AND consumer_route = 'risk_audit';
   FOR h IN SELECT id FROM iit.audit_holds WHERE deal_id = p_deal AND released_at IS NULL AND covers_version_no = v_ver AND cause IN ('material_correction','reaudit_request') LOOP
@@ -298,13 +332,15 @@ END $$;
 -- On 'approved': releases every open hold whose covering_check_id is EXACTLY this check (G4) and refreshes caches.
 CREATE FUNCTION iit.record_decision(p_check_id uuid, p_decision text, p_comments text, p_actor_base44_user_id text) RETURNS uuid
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
-DECLARE v_actor uuid; v_prev iit.actor_ctx; c record; v_dec uuid; h record;
+DECLARE v_actor uuid; v_prev iit.actor_ctx; c record; v_dec uuid; h record; v_deal uuid;
 BEGIN
   v_actor := iit.require_role(p_actor_base44_user_id, 'auditor');
   v_prev := iit.actor_push(v_actor, 'user');
+  -- the first lookup only identifies the Deal; the check is RELOADED after the lock (Codex 002 finding 1)
+  SELECT deal_id INTO v_deal FROM iit.prequalification_checks WHERE id = p_check_id;
+  IF v_deal IS NULL THEN PERFORM iit.actor_restore(v_prev); RAISE EXCEPTION 'CHECK_UNKNOWN: %', p_check_id; END IF;
+  PERFORM 1 FROM iit.deals WHERE id = v_deal FOR UPDATE;
   SELECT * INTO c FROM iit.prequalification_checks WHERE id = p_check_id;
-  IF c IS NULL THEN PERFORM iit.actor_restore(v_prev); RAISE EXCEPTION 'CHECK_UNKNOWN: %', p_check_id; END IF;
-  PERFORM 1 FROM iit.deals WHERE id = c.deal_id FOR UPDATE;
   IF c.status = 'superseded' THEN PERFORM iit.actor_restore(v_prev); RAISE EXCEPTION 'DECISION_REJECTED: attempt % is superseded', p_check_id; END IF;
   IF c.deal_version_no IS DISTINCT FROM iit.latest_released_version(c.deal_id) THEN PERFORM iit.actor_restore(v_prev); RAISE EXCEPTION 'DECISION_REJECTED: attempt % is for v%, latest released is v%', p_check_id, c.deal_version_no, iit.latest_released_version(c.deal_id); END IF;
   IF iit.open_material_draft_exists(c.deal_id) THEN PERFORM iit.actor_restore(v_prev); RAISE EXCEPTION 'DECISION_REJECTED: deal % has an open material draft', c.deal_id; END IF;
@@ -331,6 +367,8 @@ DECLARE v_actor uuid; v_prev iit.actor_ctx; v_hold uuid; v_check uuid; v_ver int
 BEGIN
   v_actor := iit.require_role(p_actor_base44_user_id, 'audit_lead');
   v_prev := iit.actor_push(v_actor, 'user');
+  PERFORM 1 FROM iit.deals WHERE id = p_deal FOR UPDATE;                 -- lock first, then read the covering version (finding 1)
+  IF NOT FOUND THEN PERFORM iit.actor_restore(v_prev); RAISE EXCEPTION 'DEAL_UNKNOWN: %', p_deal; END IF;
   v_ver := iit.latest_released_version(p_deal);
   IF v_ver IS NULL THEN PERFORM iit.actor_restore(v_prev); RAISE EXCEPTION 'NO_RELEASED_VERSION: %', p_deal; END IF;
   v_hold := iit.open_hold(p_deal, 'reaudit_request', v_actor, NULL, v_ver);
@@ -351,6 +389,8 @@ BEGIN
   SELECT deal_id INTO v_deal FROM iit.external_vehicle_reports WHERE id = p_report;
   IF v_deal IS NULL THEN PERFORM iit.actor_restore(v_prev); RAISE EXCEPTION 'REPORT_UNKNOWN: %', p_report; END IF;
   PERFORM 1 FROM iit.deals WHERE id = v_deal FOR UPDATE;
+  IF EXISTS (SELECT 1 FROM iit.external_vehicle_reports WHERE id = p_report AND acquisition = 'manual_upload' AND file_recorded_at IS NULL) THEN
+    PERFORM iit.actor_restore(v_prev); RAISE EXCEPTION 'REPORT_FILE_UNAVAILABLE: % has no recorded file; validate after finish_report_upload', p_report; END IF;
   v_ver := iit.open_draft_version(v_deal);
   IF v_ver IS NULL THEN PERFORM iit.actor_restore(v_prev); RAISE EXCEPTION 'NO_DRAFT: validations attach to the open draft; deal % has none', v_deal; END IF;
   IF NOT EXISTS (SELECT 1 FROM iit.deal_report_requirements WHERE deal_id = v_deal AND version_no = v_ver AND requirement_key = p_requirement_key) THEN

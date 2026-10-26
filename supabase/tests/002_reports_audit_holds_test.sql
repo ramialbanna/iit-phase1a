@@ -17,8 +17,8 @@ INSERT INTO iit.deal_parties(deal_id, party_id, role) VALUES ('00000000-0000-400
 
 -- RS1–RS9 report subject (§5.6)
 DO $$ BEGIN
-  INSERT INTO iit.external_vehicle_reports(id, deal_id, subject_type, vehicle_id, report_type, acquisition, pulled_at) VALUES ('00000000-0000-4000-8000-0000000000c1','00000000-0000-4000-8000-0000000000e3','vehicle','00000000-0000-4000-8000-0000000000b2','FL_DMV','manual_upload', now());   -- RS1
-  INSERT INTO iit.external_vehicle_reports(id, deal_id, subject_type, subject_org_id, report_type, acquisition, pulled_at) VALUES ('00000000-0000-4000-8000-0000000000c2','00000000-0000-4000-8000-0000000000e3','organization','00000000-0000-4000-8000-00000000000f','OPENCORPORATES','manual_upload', now());  -- RS2
+  INSERT INTO iit.external_vehicle_reports(id, deal_id, subject_type, vehicle_id, report_type, acquisition, pulled_at) VALUES ('00000000-0000-4000-8000-0000000000c1','00000000-0000-4000-8000-0000000000e3','vehicle','00000000-0000-4000-8000-0000000000b2','FL_DMV','api_pull', now());   -- RS1
+  INSERT INTO iit.external_vehicle_reports(id, deal_id, subject_type, subject_org_id, report_type, acquisition, pulled_at) VALUES ('00000000-0000-4000-8000-0000000000c2','00000000-0000-4000-8000-0000000000e3','organization','00000000-0000-4000-8000-00000000000f','OPENCORPORATES','api_pull', now());  -- RS2
   BEGIN INSERT INTO iit.external_vehicle_reports(deal_id, subject_type, vehicle_id, report_type, acquisition, pulled_at) VALUES ('00000000-0000-4000-8000-0000000000e3', NULL,'00000000-0000-4000-8000-0000000000b2','CARFAX','manual_upload', now()); RAISE EXCEPTION 'RS3'; EXCEPTION WHEN not_null_violation THEN NULL; END;
   BEGIN INSERT INTO iit.external_vehicle_reports(deal_id, subject_type, vehicle_id, report_type, acquisition, pulled_at) VALUES ('00000000-0000-4000-8000-0000000000e3','person','00000000-0000-4000-8000-0000000000b2','CARFAX','manual_upload', now()); RAISE EXCEPTION 'RS4'; EXCEPTION WHEN check_violation THEN NULL; END;
   BEGIN INSERT INTO iit.external_vehicle_reports(deal_id, subject_type, vehicle_id, subject_org_id, report_type, acquisition, pulled_at) VALUES ('00000000-0000-4000-8000-0000000000e3','vehicle','00000000-0000-4000-8000-0000000000b2','00000000-0000-4000-8000-00000000000f','CARFAX','manual_upload', now()); RAISE EXCEPTION 'RS5'; EXCEPTION WHEN check_violation THEN NULL; END;
@@ -49,6 +49,15 @@ DO $$ DECLARE n bigint; BEGIN
   -- RS9: a valid validation on the ORGANIZATION report cannot satisfy the vehicle requirement (subject mismatch)
   n := iit.validate_report('00000000-0000-4000-8000-0000000000c2','FL_DMV:5YJ3E1EA7KF317000','valid','{"subject_match":false}','wrong subject','b44-de');
   IF iit.requirement_satisfied('00000000-0000-4000-8000-0000000000e3',1,'FL_DMV:5YJ3E1EA7KF317000') THEN RAISE EXCEPTION 'RS9 wrong-subject report satisfied the requirement'; END IF;
+  -- finding 3: a CARFAX report on the same VIN cannot satisfy FL_DMV even if someone validates it 'valid'
+  INSERT INTO iit.external_vehicle_reports(id, deal_id, subject_type, vehicle_id, report_type, acquisition, pulled_at) VALUES ('00000000-0000-4000-8000-0000000000c3','00000000-0000-4000-8000-0000000000e3','vehicle','00000000-0000-4000-8000-0000000000b2','CARFAX','api_pull', now());
+  n := iit.validate_report('00000000-0000-4000-8000-0000000000c3','FL_DMV:5YJ3E1EA7KF317000','valid','{"subject_match":true}','mislabelled','b44-de');
+  IF iit.requirement_satisfied('00000000-0000-4000-8000-0000000000e3',1,'FL_DMV:5YJ3E1EA7KF317000') THEN RAISE EXCEPTION 'R2f wrong report type satisfied FL_DMV'; END IF;
+  -- finding 3: an unfinished manual upload cannot be validated nor satisfy
+  INSERT INTO iit.external_vehicle_reports(id, deal_id, subject_type, vehicle_id, report_type, acquisition, pulled_at, object_path) VALUES ('00000000-0000-4000-8000-0000000000c4','00000000-0000-4000-8000-0000000000e3','vehicle','00000000-0000-4000-8000-0000000000b2','FL_DMV','manual_upload', now(), 'report-files/x/c4');
+  BEGIN PERFORM iit.validate_report('00000000-0000-4000-8000-0000000000c4','FL_DMV:5YJ3E1EA7KF317000','valid','{"readable":true}','x','b44-de'); RAISE EXCEPTION 'R2g unfinished upload validated'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'REPORT_FILE_UNAVAILABLE%' THEN RAISE; END IF; END;
+  INSERT INTO iit.report_validations(report_id, requirement_key, deal_id, version_no, outcome, checks, validated_by) VALUES ('00000000-0000-4000-8000-0000000000c4','FL_DMV:5YJ3E1EA7KF317000','00000000-0000-4000-8000-0000000000e3',1,'valid','{}','00000000-0000-4000-8000-00000000000d');  -- direct write bypassing the function
+  IF iit.requirement_satisfied('00000000-0000-4000-8000-0000000000e3',1,'FL_DMV:5YJ3E1EA7KF317000') THEN RAISE EXCEPTION 'R2h unfinished upload satisfied the requirement'; END IF;
   -- role: an auditor cannot validate (data_entry only)
   BEGIN PERFORM iit.validate_report('00000000-0000-4000-8000-0000000000c1','FL_DMV:5YJ3E1EA7KF317000','valid','{}','x','b44-aud'); RAISE EXCEPTION 'R2e auditor validated'; EXCEPTION WHEN SQLSTATE '42501' THEN NULL; END;
 END $$;
@@ -67,6 +76,13 @@ END $$;
 
 -- R4 Risk Audit: attempt needs a released version; decision rejected on superseded check / stale version / open material draft; approval releases ONLY the covering hold
 UPDATE iit.deal_versions SET status='released', released_at=now(), released_by='00000000-0000-4000-8000-00000000000d', snapshot='{}', history_watermark=1 WHERE deal_id='00000000-0000-4000-8000-0000000000e3' AND version_no=1;
+-- finding 4: requirement rows of a released version are frozen at the DB boundary
+DO $$ BEGIN
+  BEGIN DELETE FROM iit.deal_report_requirements WHERE deal_id='00000000-0000-4000-8000-0000000000e3' AND version_no=1; RAISE EXCEPTION 'R1c delete on released requirements'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'REQUIREMENTS_FROZEN%' THEN RAISE; END IF; END;
+  BEGIN UPDATE iit.deal_report_requirements SET subject_vin='X' WHERE deal_id='00000000-0000-4000-8000-0000000000e3' AND version_no=1 AND report_type='FL_DMV'; RAISE EXCEPTION 'R1d update on released requirements'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'REQUIREMENTS_FROZEN%' THEN RAISE; END IF; END;
+  BEGIN INSERT INTO iit.deal_report_requirements(deal_id, version_no, requirement_key, report_type, subject_type, subject_vin, freshness_baseline) VALUES ('00000000-0000-4000-8000-0000000000e3',1,'CARFAX:5YJ3E1EA7KF317000','CARFAX','vehicle','5YJ3E1EA7KF317000',now()); RAISE EXCEPTION 'R1e insert on released requirements'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'REQUIREMENTS_FROZEN%' THEN RAISE; END IF; END;
+  BEGIN PERFORM iit.compute_requirements('00000000-0000-4000-8000-0000000000e3', 1); RAISE EXCEPTION 'R1f recompute on released'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'REQUIREMENTS_FROZEN%' THEN RAISE; END IF; END;
+END $$;
 DO $$ DECLARE chk1 uuid; chk2 uuid; h1 uuid; h2 uuid; dec uuid; BEGIN
   -- a hold covering v1 (simulating a material correction hold bound to v1) and a reaudit hold via the staff function
   INSERT INTO iit.material_corrections(id, deal_id, from_version_no, draft_version_no, fields, history_ids, by) VALUES ('00000000-0000-4000-8000-0000000000cc','00000000-0000-4000-8000-0000000000e3',0,1,'{purchase_price}','{1}','00000000-0000-4000-8000-00000000000d');
@@ -95,6 +111,31 @@ DO $$ DECLARE chk1 uuid; chk2 uuid; h1 uuid; h2 uuid; dec uuid; BEGIN
   IF (SELECT released_at FROM iit.audit_holds WHERE id=h1) IS NOT NULL THEN RAISE EXCEPTION 'R4i hold bound to another check was released'; END IF;
   IF (SELECT released_at FROM iit.audit_holds WHERE id=h2) IS NOT NULL THEN RAISE EXCEPTION 'R4j cancel hold released'; END IF;
   IF iit.approval_eligible('00000000-0000-4000-8000-0000000000e3') <> true THEN RAISE EXCEPTION 'R4k approval_eligible false after approval on latest version'; END IF;
+  -- finding 2: a NEW attempt on the same version invalidates the earlier approval until it is itself approved
+  chk2 := iit.create_audit_attempt('00000000-0000-4000-8000-0000000000e3','00000000-0000-4000-8000-00000000000b');
+  IF iit.approval_eligible('00000000-0000-4000-8000-0000000000e3') THEN RAISE EXCEPTION 'R4k2 eligible while the new attempt is pending'; END IF;
+  IF (SELECT count(*) FROM iit.prequalification_checks WHERE deal_id='00000000-0000-4000-8000-0000000000e3' AND status<>'superseded') <> 1 THEN RAISE EXCEPTION 'R4k3 more than one current attempt'; END IF;
+  dec := iit.record_decision(chk2,'changes_required','fix lien','b44-aud');
+  IF iit.approval_eligible('00000000-0000-4000-8000-0000000000e3') THEN RAISE EXCEPTION 'R4k4 eligible after a rejected decision'; END IF;
+  dec := iit.record_decision(chk2,'approved','fixed','b44-aud');
+  IF NOT iit.approval_eligible('00000000-0000-4000-8000-0000000000e3') THEN RAISE EXCEPTION 'R4k5 not eligible after approving the current attempt'; END IF;
+  -- finding 5: cross-deal correction, cross-deal check, release with a decision from another check / a non-approved decision
+  INSERT INTO iit.material_corrections(id, deal_id, from_version_no, draft_version_no, fields, history_ids, by) VALUES ('00000000-0000-4000-8000-0000000000cd','00000000-0000-4000-8000-0000000000e2',1,2,'{vin}','{1}','00000000-0000-4000-8000-00000000000d');
+  BEGIN PERFORM iit.open_hold('00000000-0000-4000-8000-0000000000e3','material_correction','00000000-0000-4000-8000-00000000000d','00000000-0000-4000-8000-0000000000cd',2); RAISE EXCEPTION 'R5x-a hold referenced another deal''s correction'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
+  -- a check for v1 cannot cover a hold declared for v2 (version mismatch), and a check of another deal cannot cover at all
+  BEGIN UPDATE iit.audit_holds SET covering_check_id = chk1, covers_version_no = 2 WHERE id = h2; RAISE EXCEPTION 'R5x-b hold bound to a check of a different version'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
+  INSERT INTO iit.deal_versions(deal_id, version_no, status, cause) VALUES ('00000000-0000-4000-8000-0000000000e1', 1, 'draft', 'intake') ON CONFLICT DO NOTHING;
+  UPDATE iit.deal_versions SET status='released', released_at=now(), released_by='00000000-0000-4000-8000-00000000000d', snapshot='{}', history_watermark=1 WHERE deal_id='00000000-0000-4000-8000-0000000000e1' AND version_no=1 AND status='draft';
+  chk1 := iit.create_audit_attempt('00000000-0000-4000-8000-0000000000e1','00000000-0000-4000-8000-00000000000b');   -- a check on ANOTHER deal (e1), v1
+  BEGIN UPDATE iit.audit_holds SET covering_check_id = chk1, covers_version_no = 1 WHERE id = h2; RAISE EXCEPTION 'R5x-b2 hold bound to another deal''s check'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
+  -- open a fresh bound hold and try to release it with a decision that belongs to ANOTHER check (chk1's old decisions don't exist; use dec of chk2 against a hold bound to chk3)
+  h1 := iit.request_reaudit('00000000-0000-4000-8000-0000000000e3','cross-check test','b44-lead');
+  BEGIN UPDATE iit.audit_holds SET released_at = now(), released_by_decision_id = dec WHERE id = h1; RAISE EXCEPTION 'R5x-c released with a decision from another check'; EXCEPTION WHEN foreign_key_violation THEN NULL; WHEN OTHERS THEN IF SQLERRM NOT LIKE 'HOLD_RELEASE_INVALID%' THEN RAISE; END IF; END;
+  chk2 := iit.current_attempt('00000000-0000-4000-8000-0000000000e3');
+  dec := iit.record_decision(chk2,'changes_required','not yet','b44-aud');
+  BEGIN UPDATE iit.audit_holds SET released_at = now(), released_by_decision_id = dec WHERE id = h1; RAISE EXCEPTION 'R5x-d released with a non-approved decision on the covering check'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'HOLD_RELEASE_INVALID%' THEN RAISE; END IF; END;
+  dec := iit.record_decision(chk2,'approved','now ok','b44-aud');
+  IF (SELECT released_at FROM iit.audit_holds WHERE id=h1) IS NULL THEN RAISE EXCEPTION 'R5x-e covering approval did not release'; END IF;
   IF NOT (SELECT on_hold FROM iit.deals WHERE id='00000000-0000-4000-8000-0000000000e3') THEN RAISE EXCEPTION 'R4l on_hold cache cleared while holds remain'; END IF;
   -- a hold bound to the approved check IS released: reaudit on v2 → bound to a new attempt → approve it
   h1 := iit.request_reaudit('00000000-0000-4000-8000-0000000000e3','double-check lien','b44-lead');
@@ -106,7 +147,7 @@ DO $$ DECLARE chk1 uuid; chk2 uuid; h1 uuid; h2 uuid; dec uuid; BEGIN
   -- released_at immutable
   BEGIN UPDATE iit.audit_holds SET released_at = NULL, released_by_decision_id = NULL WHERE id=h1; RAISE EXCEPTION 'R4p release reverted'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'HOLD_RELEASE_IMMUTABLE%' THEN RAISE; END IF; END;
   -- cancel hold can never be released even by direct edit (CHECK)
-  BEGIN UPDATE iit.audit_holds SET released_at = now(), released_by_decision_id = dec WHERE id=h2; RAISE EXCEPTION 'R4q cancel hold released directly'; EXCEPTION WHEN check_violation THEN NULL; END;
+  BEGIN UPDATE iit.audit_holds SET released_at = now(), released_by_decision_id = dec WHERE id=h2; RAISE EXCEPTION 'R4q cancel hold released directly'; EXCEPTION WHEN check_violation THEN NULL; WHEN OTHERS THEN IF SQLERRM NOT LIKE 'HOLD_RELEASE_UNBOUND%' THEN RAISE; END IF; END;
 END $$;
 
 -- R5 report upload/access: path scoped to deal; replaces must be same deal; access needs a recorded file and a staff role
