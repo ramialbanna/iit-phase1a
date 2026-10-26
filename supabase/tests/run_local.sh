@@ -10,7 +10,7 @@ P="psql -h $D -p $PORT -U postgres -d iit_local -v ON_ERROR_STOP=1 -q"
 psql -h "$D" -p "$PORT" -U postgres -d postgres -q -c "create database iit_local" -c "create role anon nologin" -c "create role authenticated nologin" -c "create role service_role nologin"
 UPTO=${1:-999}; rc=0
 for m in "$HERE"/migrations/*.sql; do n=$(basename "$m" | cut -c1-3); [ "$n" -le "$UPTO" ] || continue
-  if $P -f "$m" >/dev/null 2>"$D/err"; then echo "APPLY  $(basename "$m")"; else echo "FAIL   $(basename "$m")"; cat "$D/err"; rc=1; break; fi
+  if $P -f "$m" >/dev/null 2>"$D/err"; then echo "APPLY  $(basename "$m")"; else echo "FAIL   $(basename "$m")"; grep -E "ERROR|LINE|DETAIL|CONTEXT" "$D/err" | head -8; rc=1; break; fi
   t="$HERE/tests/${n}_"*_test.sql; for tf in $t; do [ -e "$tf" ] || continue
     if out=$($P -f "$tf" 2>&1); then echo "PASS   $(basename "$tf"): $(echo "$out" | grep -o 'ALL [0-9]* TESTS PASS')"; else echo "FAIL   $(basename "$tf")"; echo "$out" | grep -E "ERROR|LINE|DETAIL" | head -6; rc=1; fi; done
   [ $rc = 0 ] || break
