@@ -54,7 +54,7 @@ ALTER TABLE iit.work_items ADD CONSTRAINT work_items_kind_check CHECK (kind IN (
 INSERT INTO iit.json_schemas(name, schema, note) VALUES
   ('gate_outcome_evidence', '{"provider_message_id":true,"package_id":true,"trip_id":true,"target":true,"http_status":true,"note":true}', '§6.2 outcome evidence (D-37); no payloads'),
   ('gate_event_detail', '{"reason":true,"supplied_row_status":true,"read_31_status":true,"read_31_at":true,"status_mismatch":true,"outcome":true,"attempt_no":true,"hold_id":true,"replay":true,"resolution":true,"caller_integration":true}', '§6.2 gated_action_events.detail');
-UPDATE iit.json_schemas SET schema = schema || '{"action_key":true,"attempt_id":true,"state":true}'::jsonb, updated_at = now(), note = note || '; 005: action_key, attempt_id, state' WHERE name = 'activity_event_detail';
+UPDATE iit.json_schemas SET schema = schema || '{"action_key":true,"attempt_id":true,"state":true,"caller_integration":true}'::jsonb, updated_at = now(), note = note || '; 005: action_key, attempt_id, state' WHERE name = 'activity_event_detail';
 
 -- ---------------------------------------------------------------------------------------------------------------------
 -- 2. gate tables (§6.2)
@@ -184,6 +184,14 @@ BEGIN
   BEGIN
     IF coalesce(p_action_key, '') = '' OR coalesce(p_iid, '') = '' OR coalesce(p_action, '') = '' OR coalesce(p_caller_integration, '') = '' THEN
       RAISE EXCEPTION 'GATE_ARGS: action_key, iid, action and caller_integration are required'; END IF;
+    -- P1 allowlist FIRST (Codex 005 rev-3): an integration not listed for this action is refused before any lookup, lock or
+    -- row creation, so it can never bind an action key. Logged in activity_events (there is no gated_actions row to attach to).
+    IF NOT EXISTS (SELECT 1 FROM iit.gate_integration_actions x WHERE x.caller_integration = p_caller_integration AND x.action = p_action) THEN
+      INSERT INTO iit.activity_events(deal_id, entity_type, entity_id, action, after, actor_id, actor_kind, source)
+        VALUES (NULL, 'gate_request', NULL, 'integration_not_allowed', pg_catalog.jsonb_build_object('action_key', p_action_key, 'caller_integration', p_caller_integration), iit.worker_user(), 'worker', 'gate');
+      PERFORM iit.actor_restore(v_prev);
+      RETURN pg_catalog.jsonb_build_object('allowed', false, 'reason', 'integration_not_allowed');
+    END IF;
     -- eligibility at this moment (§6.3), then the Deal lock FOR SHARE and a re-check under it (a hold that committed first is seen)
     SELECT * INTO ra FROM iit.row_actionable(p_iid);
     IF ra.deal_id IS NOT NULL THEN PERFORM 1 FROM iit.deals WHERE id = ra.deal_id FOR SHARE; SELECT * INTO ra FROM iit.row_actionable(p_iid); END IF;
@@ -191,7 +199,6 @@ BEGIN
     SELECT (value #>> '{}')::int INTO v_max_age FROM iit.system_settings WHERE key = 'gate_31_read_max_age_seconds';
     SELECT active INTO v_active FROM iit.legacy_31_statuses WHERE status = p_read_31_status;
     v_deny := CASE
-      WHEN NOT EXISTS (SELECT 1 FROM iit.gate_integration_actions x WHERE x.caller_integration = p_caller_integration AND x.action = p_action) THEN 'integration_not_allowed'   -- P1 allowlist, first
       WHEN p_read_31_status IS NULL OR p_read_31_at IS NULL THEN 'read_31_failed'
       WHEN p_read_31_at < pg_catalog.clock_timestamp() - pg_catalog.make_interval(secs => v_max_age) OR p_read_31_at > pg_catalog.clock_timestamp() + interval '5 seconds' THEN 'read_31_stale'
       WHEN v_active IS NULL THEN 'status_31_unknown'

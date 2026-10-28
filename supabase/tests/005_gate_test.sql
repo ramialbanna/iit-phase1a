@@ -45,12 +45,23 @@ END $$;
 
 -- Y2 authorize_and_consume: the 3.1 read, denials kept, grant, single executor, key reuse
 -- P1 allowlist: with an EMPTY gate_integration_actions nothing is granted; TEST rows are then added for the integrations used below
-DO $$ DECLARE r jsonb; BEGIN
-  r := iit.authorize_and_consume('package:IID-D1:v1', 'IID-D1', 'package', 'appsheet:31', 'run-0', NULL, 'In-Progress', 'In-Progress', now());
-  IF (r ->> 'allowed')::boolean OR r ->> 'reason' <> 'integration_not_allowed' THEN RAISE EXCEPTION 'Y2-0 granted with an empty allowlist: %', r; END IF;
-  INSERT INTO iit.gate_integration_actions VALUES ('appsheet:31','package','TEST'), ('appsheet:31','dispatch','TEST'), ('zap:texts','text','TEST');
+DO $$ DECLARE r jsonb; n int; BEGIN
+  -- an UNLISTED integration presents the key first: refused, no gated_actions row, logged in activity_events
+  r := iit.authorize_and_consume('package:IID-D1:v1', 'IID-D1', 'package', 'zap:rogue', 'zr-0', NULL, 'In-Progress', 'In-Progress', now());
+  IF (r ->> 'allowed')::boolean OR r ->> 'reason' <> 'integration_not_allowed' OR r ? 'action_id' THEN RAISE EXCEPTION 'Y2-0 granted with an empty allowlist: %', r; END IF;
+  IF EXISTS (SELECT 1 FROM iit.gated_actions WHERE action_key = 'package:IID-D1:v1') THEN RAISE EXCEPTION 'Y2-0b an unlisted integration created/bound the action row'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM iit.activity_events WHERE action = 'integration_not_allowed' AND after ->> 'caller_integration' = 'zap:rogue' AND after ->> 'action_key' = 'package:IID-D1:v1') THEN RAISE EXCEPTION 'Y2-0c refusal not logged'; END IF;
+  INSERT INTO iit.gate_integration_actions VALUES ('appsheet:31','package','TEST'), ('appsheet:31','dispatch','TEST'), ('zap:texts','text','TEST'),
+    ('appsheet:second','package','TEST second app, also allowed packages'), ('zap:texts2','text','TEST second Zap'), ('zap:dispatch','dispatch','TEST');
+  -- a listed integration is still refused an action it is not listed for, and creates no row
   r := iit.authorize_and_consume('text:IID-D1:p1', 'IID-D1', 'text', 'appsheet:31', 'run-0b', NULL, 'In-Progress', 'In-Progress', now());
-  IF (r ->> 'allowed')::boolean OR r ->> 'reason' <> 'integration_not_allowed' THEN RAISE EXCEPTION 'Y2-1 integration allowed for an action it is not listed for: %', r; END IF;
+  IF (r ->> 'allowed')::boolean OR r ->> 'reason' <> 'integration_not_allowed' OR EXISTS (SELECT 1 FROM iit.gated_actions WHERE action_key = 'text:IID-D1:p1') THEN RAISE EXCEPTION 'Y2-1 %', r; END IF;
+  -- same-key recovery: the legitimate integration can now take the key the rogue one tried (it was never bound)
+  r := iit.authorize_and_consume('package:IID-D1:v1', 'IID-D1', 'package', 'appsheet:31', 'run-0c', NULL, 'In-Progress', 'Rescheduled', now());
+  IF r ->> 'reason' <> 'status_31_inactive' OR (SELECT caller_integration FROM iit.gated_actions WHERE action_key = 'package:IID-D1:v1') <> 'appsheet:31' THEN RAISE EXCEPTION 'Y2-2 recovery: %', r; END IF;
+  -- and the rogue integration cannot bind it afterwards either (allowlist refusal precedes the binding check)
+  r := iit.authorize_and_consume('package:IID-D1:v1', 'IID-D1', 'package', 'zap:rogue', 'zr-1', NULL, 'In-Progress', 'In-Progress', now());
+  IF r ->> 'reason' <> 'integration_not_allowed' OR (SELECT caller_integration FROM iit.gated_actions WHERE action_key = 'package:IID-D1:v1') <> 'appsheet:31' THEN RAISE EXCEPTION 'Y2-3 %', r; END IF;
 END $$;
 DO $$ DECLARE r jsonb; a1 uuid; act uuid; BEGIN
   BEGIN PERFORM iit.authorize_and_consume('', 'IID-D1', 'package', 'appsheet:31', 'run-1', NULL, NULL, 'In-Progress', now()); RAISE EXCEPTION 'Y2a'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'GATE_ARGS%' THEN RAISE; END IF; END;
@@ -79,11 +90,13 @@ DO $$ DECLARE r jsonb; a1 uuid; act uuid; BEGIN
   r := iit.authorize_and_consume('package:IID-D1:v1', 'IID-D1', 'package', 'appsheet:31', 'run-2', NULL, 'In-Progress', 'In-Progress', now());
   IF (r ->> 'allowed')::boolean OR r ->> 'reason' <> 'in_progress' THEN RAISE EXCEPTION 'Y2m same-run replay allowed'; END IF;
   r := iit.authorize_and_consume('package:IID-D1:v1', 'IID-D1', 'package', 'zap:texts', 'zrun-9', NULL, 'In-Progress', 'In-Progress', now());
-  IF (r ->> 'allowed')::boolean OR r ->> 'reason' <> 'wrong_integration' OR (SELECT count(*) FROM iit.gated_action_attempts WHERE action_id = act) <> 1 THEN RAISE EXCEPTION 'Y2n second executor (other integration is denied before the state table, P1)'; END IF;
+  IF (r ->> 'allowed')::boolean OR r ->> 'reason' <> 'integration_not_allowed' THEN RAISE EXCEPTION 'Y2n-a unlisted integration: %', r; END IF;
+  r := iit.authorize_and_consume('package:IID-D1:v1', 'IID-D1', 'package', 'appsheet:second', 'run-s1', NULL, 'In-Progress', 'In-Progress', now());
+  IF (r ->> 'allowed')::boolean OR r ->> 'reason' <> 'wrong_integration' OR (SELECT count(*) FROM iit.gated_action_attempts WHERE action_id = act) <> 1 THEN RAISE EXCEPTION 'Y2n second executor (a listed but different integration is denied by the binding, P1)'; END IF;
   BEGIN PERFORM iit.authorize_and_consume('package:IID-D1:v1', 'IID-300', 'package', 'appsheet:31', 'run-3', NULL, 'In-Progress', 'In-Progress', now()); RAISE EXCEPTION 'Y2o key reused'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'GATE_KEY_REUSED%' THEN RAISE; END IF; END;
   -- P1: the action is bound to the integration that created it; another integration is denied wrong_integration (logged, no attempt)
-  r := iit.authorize_and_consume('package:IID-D1:v1', 'IID-D1', 'package', 'zap:texts', 'zrun-10', NULL, 'In-Progress', 'In-Progress', now());
-  IF (r ->> 'allowed')::boolean OR r ->> 'reason' <> 'wrong_integration' OR NOT EXISTS (SELECT 1 FROM iit.gated_action_events WHERE action_id = act AND event = 'denied' AND detail ->> 'reason' = 'wrong_integration' AND caller_integration = 'zap:texts') THEN RAISE EXCEPTION 'Y2o2 %', r; END IF;
+  r := iit.authorize_and_consume('package:IID-D1:v1', 'IID-D1', 'package', 'appsheet:second', 'run-s2', NULL, 'In-Progress', 'In-Progress', now());
+  IF (r ->> 'allowed')::boolean OR r ->> 'reason' <> 'wrong_integration' OR NOT EXISTS (SELECT 1 FROM iit.gated_action_events WHERE action_id = act AND event = 'denied' AND detail ->> 'reason' = 'wrong_integration' AND caller_integration = 'appsheet:second') THEN RAISE EXCEPTION 'Y2o2 %', r; END IF;
   BEGIN UPDATE iit.gated_actions SET caller_integration = 'zap:texts' WHERE id = act; RAISE EXCEPTION 'Y2o3 binding rewritten'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'ACTION_IMMUTABLE%' THEN RAISE; END IF; END;
   -- attempt grant facts are immutable; a terminal attempt never changes state
   BEGIN UPDATE iit.gated_action_attempts SET caller_integration = 'zap:texts' WHERE id = a1; RAISE EXCEPTION 'Y2p'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'ATTEMPT_IMMUTABLE%' THEN RAISE; END IF; END;
@@ -121,7 +134,7 @@ DO $$ DECLARE r jsonb; act uuid; a1 uuid; a2 uuid; a3 uuid; a4 uuid; wi uuid; BE
   IF NOT (r ->> 'allowed')::boolean THEN RAISE EXCEPTION 'Y3n %', r; END IF;
   r := iit.report_action_outcome(a2, 'failed_definitive', '{"http_status":400}', 'zap:texts', 'z1');
   IF r ->> 'state' <> 'failed_definitive' THEN RAISE EXCEPTION 'Y3o'; END IF;
-  r := iit.authorize_and_consume('text:IID-300:welcome:2026-10-27', 'IID-300', 'text', 'appsheet:31', 'run-x', NULL, 'In-Progress', 'In-Progress', now());
+  r := iit.authorize_and_consume('text:IID-300:welcome:2026-10-27', 'IID-300', 'text', 'zap:texts2', 'z2-x', NULL, 'In-Progress', 'In-Progress', now());
   IF (r ->> 'allowed')::boolean OR r ->> 'reason' <> 'wrong_integration' OR (SELECT count(*) FROM iit.gated_action_attempts WHERE action_id = act) <> 1 THEN RAISE EXCEPTION 'Y3o2 takeover after failure: %', r; END IF;
   r := iit.authorize_and_consume('text:IID-300:welcome:2026-10-27', 'IID-300', 'text', 'zap:texts', 'z2', NULL, 'In-Progress', 'In-Progress', now());
   a3 := (r ->> 'attempt_id')::uuid;
