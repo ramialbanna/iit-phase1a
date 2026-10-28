@@ -80,6 +80,14 @@ CREATE UNIQUE INDEX one_granted_attempt_per_action ON iit.gated_action_attempts 
 ALTER TABLE iit.gated_actions ADD CONSTRAINT gated_actions_current_attempt_fk FOREIGN KEY (current_attempt_id, id) REFERENCES iit.gated_action_attempts(id, action_id);
 CREATE INDEX gated_actions_deal_idx ON iit.gated_actions (deal_id);
 CREATE TRIGGER gated_actions_evidence_policy BEFORE INSERT OR UPDATE ON iit.gated_actions FOR EACH ROW EXECUTE FUNCTION iit.enforce_json('outcome_evidence', 'gate_outcome_evidence');
+-- the action's identity (key, iD, action, bound integration) never changes once created (P1)
+CREATE FUNCTION iit.gated_actions_guard() RETURNS trigger LANGUAGE plpgsql SET search_path = '' AS $$
+BEGIN
+  IF NEW.action_key <> OLD.action_key OR NEW.iid <> OLD.iid OR NEW.action <> OLD.action OR NEW.caller_integration <> OLD.caller_integration OR NEW.created_at <> OLD.created_at THEN
+    RAISE EXCEPTION 'ACTION_IMMUTABLE: identity of gated action % cannot change', OLD.id; END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER gated_actions_guard BEFORE UPDATE ON iit.gated_actions FOR EACH ROW EXECUTE FUNCTION iit.gated_actions_guard();
 SELECT iit.attach_history('iit.gated_actions');
 SELECT iit.attach_history('iit.gated_action_attempts');
 -- every call and report is an append-only event
@@ -188,10 +196,18 @@ BEGIN
       VALUES (p_action_key, p_iid, ra.deal_id, p_action, p_caller_integration, p_triggered_by, 'denied') ON CONFLICT (action_key) DO NOTHING;
     SELECT * INTO g FROM iit.gated_actions WHERE action_key = p_action_key FOR UPDATE;
     IF g.iid <> p_iid OR g.action <> p_action THEN RAISE EXCEPTION 'GATE_KEY_REUSED: action_key % belongs to %/%', p_action_key, g.action, g.iid; END IF;
+    -- P1 (Codex 005 rev-1): an action is BOUND to the integration that first presented its key. Any other authenticated
+    -- integration is denied and logged — it can neither take the key over after a failure nor replay it.
+    IF g.caller_integration <> p_caller_integration THEN
+      INSERT INTO iit.gated_action_events(action_id, attempt_id, event, caller_integration, caller_run_ref, detail) VALUES (g.id, g.current_attempt_id, 'denied', p_caller_integration, p_caller_run_ref, v_detail || '{"reason":"wrong_integration"}');
+      PERFORM iit.actor_restore(v_prev);
+      RETURN pg_catalog.jsonb_build_object('allowed', false, 'reason', 'wrong_integration', 'action_id', g.id);
+    END IF;
     SELECT * INTO t FROM iit.gated_action_attempts WHERE action_id = g.id AND state = 'granted';
     -- state table of §6.2, in order
     IF t.id IS NOT NULL THEN
-      IF v_deny IS NULL AND EXISTS (SELECT 1 FROM iit.gate_idempotent_targets x WHERE x.action = g.action) THEN
+      -- P2: a replay is possible only for the bound integration (checked above) AND a proven-idempotent target
+      IF v_deny IS NULL AND t.caller_integration = p_caller_integration AND EXISTS (SELECT 1 FROM iit.gate_idempotent_targets x WHERE x.action = g.action) THEN
         INSERT INTO iit.gated_action_events(action_id, attempt_id, event, caller_integration, caller_run_ref, detail) VALUES (g.id, t.id, 'replay', p_caller_integration, p_caller_run_ref, v_detail || '{"replay":true}');
         PERFORM iit.actor_restore(v_prev);
         RETURN pg_catalog.jsonb_build_object('allowed', true, 'replay', true, 'attempt_id', t.id, 'action_id', g.id, 'reason', 'idempotent_target');
@@ -222,7 +238,7 @@ BEGIN
     INSERT INTO iit.gated_action_attempts(action_id, attempt_no, caller_integration, caller_run_ref, supplied_row_status, read_31_status, read_31_at)
       VALUES (g.id, v_no, p_caller_integration, p_caller_run_ref, p_supplied_row_status, p_read_31_status, p_read_31_at) RETURNING id INTO v_attempt;
     UPDATE iit.gated_actions SET state = 'in_progress', current_attempt_id = v_attempt, deal_id = ra.deal_id, authorized_at = now(), deal_version = ra.deal_version,
-                                 caller_integration = p_caller_integration, triggered_by_text = p_triggered_by WHERE id = g.id;
+                                 triggered_by_text = p_triggered_by WHERE id = g.id;                       -- caller_integration is never rewritten (P1)
     INSERT INTO iit.gated_action_events(action_id, attempt_id, event, caller_integration, caller_run_ref, detail) VALUES (g.id, v_attempt, 'granted', p_caller_integration, p_caller_run_ref, v_detail || pg_catalog.jsonb_build_object('attempt_no', v_no));
   EXCEPTION WHEN OTHERS THEN PERFORM iit.actor_restore(v_prev); RAISE;
   END;

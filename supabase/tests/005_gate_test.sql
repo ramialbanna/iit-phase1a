@@ -71,8 +71,12 @@ DO $$ DECLARE r jsonb; a1 uuid; act uuid; BEGIN
   r := iit.authorize_and_consume('package:IID-D1:v1', 'IID-D1', 'package', 'appsheet:31', 'run-2', NULL, 'In-Progress', 'In-Progress', now());
   IF (r ->> 'allowed')::boolean OR r ->> 'reason' <> 'in_progress' THEN RAISE EXCEPTION 'Y2m same-run replay allowed'; END IF;
   r := iit.authorize_and_consume('package:IID-D1:v1', 'IID-D1', 'package', 'zap:texts', 'zrun-9', NULL, 'In-Progress', 'In-Progress', now());
-  IF (r ->> 'allowed')::boolean OR r ->> 'reason' <> 'in_progress' OR (SELECT count(*) FROM iit.gated_action_attempts WHERE action_id = act) <> 1 THEN RAISE EXCEPTION 'Y2n second executor'; END IF;
+  IF (r ->> 'allowed')::boolean OR r ->> 'reason' <> 'wrong_integration' OR (SELECT count(*) FROM iit.gated_action_attempts WHERE action_id = act) <> 1 THEN RAISE EXCEPTION 'Y2n second executor (other integration is denied before the state table, P1)'; END IF;
   BEGIN PERFORM iit.authorize_and_consume('package:IID-D1:v1', 'IID-300', 'package', 'appsheet:31', 'run-3', NULL, 'In-Progress', 'In-Progress', now()); RAISE EXCEPTION 'Y2o key reused'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'GATE_KEY_REUSED%' THEN RAISE; END IF; END;
+  -- P1: the action is bound to the integration that created it; another integration is denied wrong_integration (logged, no attempt)
+  r := iit.authorize_and_consume('package:IID-D1:v1', 'IID-D1', 'package', 'zap:texts', 'zrun-10', NULL, 'In-Progress', 'In-Progress', now());
+  IF (r ->> 'allowed')::boolean OR r ->> 'reason' <> 'wrong_integration' OR NOT EXISTS (SELECT 1 FROM iit.gated_action_events WHERE action_id = act AND event = 'denied' AND detail ->> 'reason' = 'wrong_integration' AND caller_integration = 'zap:texts') THEN RAISE EXCEPTION 'Y2o2 %', r; END IF;
+  BEGIN UPDATE iit.gated_actions SET caller_integration = 'zap:texts' WHERE id = act; RAISE EXCEPTION 'Y2o3 binding rewritten'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'ACTION_IMMUTABLE%' THEN RAISE; END IF; END;
   -- attempt grant facts are immutable; a terminal attempt never changes state
   BEGIN UPDATE iit.gated_action_attempts SET caller_integration = 'zap:texts' WHERE id = a1; RAISE EXCEPTION 'Y2p'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'ATTEMPT_IMMUTABLE%' THEN RAISE; END IF; END;
   IF current_setting('app.actor_kind', true) <> '' THEN RAISE EXCEPTION 'Y2q actor context leaked'; END IF;
@@ -109,6 +113,8 @@ DO $$ DECLARE r jsonb; act uuid; a1 uuid; a2 uuid; a3 uuid; a4 uuid; wi uuid; BE
   IF NOT (r ->> 'allowed')::boolean THEN RAISE EXCEPTION 'Y3n %', r; END IF;
   r := iit.report_action_outcome(a2, 'failed_definitive', '{"http_status":400}', 'zap:texts', 'z1');
   IF r ->> 'state' <> 'failed_definitive' THEN RAISE EXCEPTION 'Y3o'; END IF;
+  r := iit.authorize_and_consume('text:IID-300:welcome:2026-10-27', 'IID-300', 'text', 'appsheet:31', 'run-x', NULL, 'In-Progress', 'In-Progress', now());
+  IF (r ->> 'allowed')::boolean OR r ->> 'reason' <> 'wrong_integration' OR (SELECT count(*) FROM iit.gated_action_attempts WHERE action_id = act) <> 1 THEN RAISE EXCEPTION 'Y3o2 takeover after failure: %', r; END IF;
   r := iit.authorize_and_consume('text:IID-300:welcome:2026-10-27', 'IID-300', 'text', 'zap:texts', 'z2', NULL, 'In-Progress', 'In-Progress', now());
   a3 := (r ->> 'attempt_id')::uuid;
   IF NOT (r ->> 'allowed')::boolean OR (SELECT attempt_no FROM iit.gated_action_attempts WHERE id = a3) <> 2 THEN RAISE EXCEPTION 'Y3p retry after definitive failure'; END IF;
@@ -130,6 +136,8 @@ DO $$ DECLARE r jsonb; act uuid; a1 uuid; a2 uuid; a3 uuid; a4 uuid; wi uuid; BE
   r := iit.authorize_and_consume('dispatch:IID-300:T1', 'IID-300', 'dispatch', 'appsheet:31', 'run-8', NULL, 'In-Progress', 'In-Progress', now());
   IF (r ->> 'allowed')::boolean THEN RAISE EXCEPTION 'Y3u replay without proof'; END IF;
   INSERT INTO iit.gate_idempotent_targets VALUES ('dispatch', 'TEST ONLY');
+  r := iit.authorize_and_consume('dispatch:IID-300:T1', 'IID-300', 'dispatch', 'zap:dispatch', 'zd1', NULL, 'In-Progress', 'In-Progress', now());
+  IF (r ->> 'allowed')::boolean OR r ->> 'reason' <> 'wrong_integration' THEN RAISE EXCEPTION 'Y3u2 replay crossed integrations: %', r; END IF;
   r := iit.authorize_and_consume('dispatch:IID-300:T1', 'IID-300', 'dispatch', 'appsheet:31', 'run-8', NULL, 'In-Progress', 'In-Progress', now());
   IF NOT (r ->> 'allowed')::boolean OR NOT (r ->> 'replay')::boolean OR (r ->> 'attempt_id')::uuid <> a4 OR (SELECT count(*) FROM iit.gated_action_attempts WHERE action_id = (r ->> 'action_id')::uuid) <> 1 THEN RAISE EXCEPTION 'Y3v replay on proven target: %', r; END IF;
   DELETE FROM iit.gate_idempotent_targets WHERE action = 'dispatch';
