@@ -1,16 +1,19 @@
 # 008 — Logistics read interface: planning note (NOT a migration)
 
 **Status:** planning only, on branch `docs/008-logistics-read-requirements`. No SQL, role, grant, function, table, credential or secret is created by this PR. Nothing is applied anywhere.
-**Base:** `main` @ `c4650bc` (PR #12 merged: non-superuser executor `SET ROLE iit_owner`; `authenticator` memberships SET-only).
+**Base:** `main` @ `f72924f` (PR #12 merged: non-superuser executor `SET ROLE iit_owner`; `authenticator` memberships SET-only. PR #14 merged: post-application verification and decisions V-1/V-2).
 **Input:** `docs/migrations/008-logistics-requirements-v2.1.md` (TAVOps Logistics handoff, with owner amendment A1 on correlation ids).
-**Remote state as reported by the owner:** 001–006 applied to the target project; **post-application verification still pending**. IIT 007 not finalized.
+**Remote state:** 001–006 applied to the target project, and the post-application verification **passed** (`docs/preflight/phase-c-post-application-verification-2026-10-28.md`). IIT 007 not finalized.
 **Revision r2 (2026-10-28):** the review verdict was "approve with changes". This revision records the owner decisions on Q1–Q9 (§9) and the required credential-`jti` hardening (§3.1, §10 T15). The only items still open are R1–R2 in §9.
+**Revision r3 (2026-10-28):** rebased onto `f72924f`; prerequisites updated (§0); §6.1 corrected for V-2 (the per-schema default-privilege revoke is ineffective); Q2 and Q8 wording aligned with the recorded decisions.
 
-## 0. Gate: 008 is not written until all of these hold
-1. The post-application verification of 001–006 is complete **and reviewed**.
-2. IIT 007 (Base44 staff-screen reads: `get_deal`, `list_deals`, `list_work_items`, `list_audit_queue`, `get_report`, `list_staff`) has final contracts and is merged. **007 stays reserved for those reads.**
-3. 008 is built on a **fresh branch** from the canonical `main` that results, and this note is re-checked against it (§7). That includes re-evaluating Q4 if 007 introduces a read-audit table.
-4. ~~The owner decides Q1–Q5.~~ Decided in r2 (§9). R1–R2 are confirmed at implementation review.
+## 0. Prerequisites — 008 is not implemented until all of these hold
+1. **PR #12:** satisfied and merged (`c4650bc`).
+2. **Migrations 001–006:** applied, and the post-application verification passed (PR #14, `f72924f`).
+3. **V-2:** migration 007 adds and tests the global default-function privilege revoke (`ALTER DEFAULT PRIVILEGES FOR ROLE iit_owner REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC`, no `IN SCHEMA`) **before any new IIT function is created**. 008 creates functions, so it depends on this.
+4. **Migration 007 is unfinished and blocks implementation of 008.** IIT 007 (Base44 staff-screen reads: `get_deal`, `list_deals`, `list_work_items`, `list_audit_queue`, `get_report`, `list_staff`) must have final contracts, include the V-2 correction and its tests, and be merged. **007 stays reserved for those reads.**
+5. 008 is built on a **fresh branch** from the canonical `main` that results, and this note is re-checked against it (§7). That includes re-evaluating Q4 if 007 introduces a read-audit table.
+6. ~~The owner decides Q1–Q9.~~ Decided in r2 (§9). R1–R2 are confirmed at implementation review.
 
 ## 1. Purpose and boundaries
 - **What Logistics gets:** it references `iit.deals.id` (soft reference, Logistics side) and reads IIT **only** through three functions, called by the Logistics Worker via PostgREST with a dedicated JWT whose `role` claim is `iit_logistics_reader`.
@@ -66,7 +69,7 @@
    4. more than 500 elements (VINs: 50) → `INPUT_TOO_LARGE`;
    5. any malformed element → `INPUT_INVALID`:
       - deal id: not a canonical UUID;
-      - VIN (Q2 decided): empty after `upper(btrim())`, or longer than the bound R1. **There is no 17-character rule at this boundary.** Logistics may separately require a valid 17-character VIN before dispatch;
+      - VIN (Q2 decided): empty after `upper(btrim())`, or longer than the bound R1. **There is no 17-character rule at this boundary**, because IIT stores VINs without that constraint. Logistics separately enforces a valid 17-character VIN before dispatch;
       - 3.1 iD: empty after `btrim()`, or longer than the bound R1.
 4. On a denial: `PERFORM iit._logistics_audit(..., 'denied', code)`, then **RETURN** the denial envelope (no raise).
 5. Otherwise call the helper, `PERFORM iit._logistics_audit(..., 'ok', NULL)`, then RETURN the `ok` envelope.
@@ -118,7 +121,7 @@
 | infrastructure/bug exception after the audit insert | raises; the audit row rolls back with the call | Worker boundary + Postgres/API logs |
 
 - **No extension:** `dblink` and autonomous transactions are not used.
-- **Retention (Q8 decided):** keep the append-only audit indefinitely for Phase 1. No deletion mechanism is added until a separate retention policy has been reviewed.
+- **Retention (Q8 decided):** keep the append-only audit indefinitely for Phase 1. Any deletion or retention mechanism requires a separately reviewed policy **and migration**.
 - **Caller rule:** an HTTP-200 `denied` envelope is a refusal; the Worker applies nothing from it.
 
 ## 6. Roles, memberships and the exact privilege matrix
@@ -131,7 +134,7 @@
   - `GRANT EXECUTE` on the three exact signatures;
   - `REVOKE ALL ON FUNCTION` for each new object `FROM PUBLIC`;
   - explicit `REVOKE ALL ON ALL TABLES, ALL SEQUENCES IN SCHEMA iit FROM iit_logistics_reader` (documents intent).
-- **Default privileges:** unchanged (001 already revokes functions from PUBLIC for objects `iit_owner` creates).
+- **Default privileges (corrected in r3, V-2):** 001/006's `ALTER DEFAULT PRIVILEGES … IN SCHEMA iit REVOKE … FROM PUBLIC` is a no-op; PostgreSQL's built-in PUBLIC EXECUTE on new functions cannot be revoked per schema. 008 therefore relies on (a) 007's global `ALTER DEFAULT PRIVILEGES FOR ROLE iit_owner REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC`, which must be applied first (§0), **and** (b) an explicit `REVOKE ALL ON FUNCTION … FROM PUBLIC` for every function 008 creates (above). T8 asserts that none of 008's functions is executable by PUBLIC.
 
 ### 6.2 Privilege matrix (target; asserted by test T8)
 | Object ↓ / Role → | `iit_logistics_reader` | `iit_base44` | `tav_worker` | `iit_integration` | `anon` / `authenticated` / `service_role` / PUBLIC | `iit_owner` |
@@ -168,16 +171,17 @@
 ## 9. Decisions (r2, review of 2026-10-28) and remaining items
 | # | Decision |
 |---|---|
-| Q1 | **Stock number:** not in 008. It's added later only after IIT has an authoritative deal/vehicle ↔ `idms_stock` relationship. |
-| Q2 | **VIN lookup:** accept a non-empty normalized VIN within a bounded length (R1) and do an exact lookup. There's no 17-character rule at the IIT boundary; Logistics may require one before dispatch. |
-| Q3 | **Live deal:** `cancelled_at IS NULL AND final_closure_at IS NULL AND intake_status <> 'voided'`. |
-| Q4 | **Audit table:** dedicated `iit.logistics_read_audit`, unless the final 007 provides a compatible shared read-audit table. Re-evaluate after 007. |
-| Q5 | **Credential lifetime:** D-48 unchanged (≤ 180 days; reminders at 30/14/7; immediate permanent `jti` revocation on compromise). |
-| Q6 | **Actor context:** no actor push/restore. There's no history-covered mutation, and the credential is recorded directly in the audit. |
-| Q7 | **`iit_integration`:** no privilege on `logistics_read_audit`. Explicitly revoked and tested. |
-| Q8 | **Retention:** indefinite for Phase 1. A separate reviewed retention policy comes before any deletion mechanism. |
-| Q9 | **Batch limits:** 500 for 3.1/deal lookups, 50 for VIN candidates. Response-size and execution-time tests (T16) are required before implementation approval. |
-| jti | **Required hardening:** a canonical v4 UUID `jti`, `CREDENTIAL_INVALID_JTI` otherwise, stored as `uuid`, revocation via a canonical text comparison (§3.1). |
+| Q1 | **Stock number:** drop `stock_number` from Migration 008. Add it later only after IIT has an authoritative deal/vehicle-to-`idms_stock` relationship. |
+| Q2 | **VIN lookup:** accept a non-empty normalized VIN within a bounded length (R1) and perform an exact lookup. Do not require 17 characters at the IIT lookup boundary, because IIT currently stores VINs without that constraint. Logistics separately enforces valid 17-character VINs before dispatch. |
+| Q3 | **Live deal:** a deal is a live VIN candidate only when `cancelled_at IS NULL`, `final_closure_at IS NULL` and `intake_status <> 'voided'`. |
+| Q4 | **Audit table:** use a dedicated `iit.logistics_read_audit` table unless finalized Migration 007 establishes a compatible shared read-audit contract. Re-evaluate after 007. |
+| Q5 | **Credential lifetime:** D-48 applies unchanged: maximum 180 days, reminders at 30/14/7 days, immediate permanent `jti` revocation on compromise. |
+| Q6 | **Actor context:** no actor push/restore is required, because the interface does not mutate history-covered business rows. The integration credential is recorded in the dedicated audit. |
+| Q7 | **`iit_integration`:** no privilege on `iit.logistics_read_audit`. Explicitly revoke all privileges and test the denial. |
+| Q8 | **Retention:** retain the append-only Logistics read audit indefinitely for Phase 1. Any deletion/retention mechanism requires a separately reviewed policy and migration. |
+| Q9 | **Batch limits:** 500 for 3.1/deal lookup inputs and 50 for VIN candidate inputs. Response-size and execution-time tests (T16) are required before implementation approval. |
+| jti | **Credential hardening (required):** the Logistics credential `jti` must be a Worker-generated canonical lowercase UUIDv4. `require_logistics_reader` rejects malformed, oversized, nil, non-v4 and identifier-shaped `jti` values with `CREDENTIAL_INVALID_JTI`. `credential_jti` is stored in the Logistics audit as `uuid`; its canonical UUID text is compared to the existing `iit.revoked_credentials.jti` text column. Tests cover valid UUIDv4, malformed, oversized, nil, other UUID versions, VIN-like, deal-like, 3.1-like and email-like values (T15). A rejected `jti` is never stored or echoed (§3.1). |
+| V-2 | **Prerequisite (from PR #14):** 007 adds and tests the global default-function privilege revoke before 008 creates any function (§0, §6.1). |
 
 **Remaining (to confirm at 008 implementation review; not filled silently):**
 - **R1, element length bounds.** Q2 requires "a bounded length" but doesn't set one.
@@ -229,4 +233,5 @@
   - a revocation entered as uppercase or space-padded text still revokes it (`CREDENTIAL_REVOKED`).
 - **T16 batch budgets (Q9).** For the largest permitted batch of each function (500 / 500 / 50, all found, plus a duplicates-heavy variant), the response size and execution time fall within R2. 501 / 501 / 51 is still denied before any data read.
 - **T8 addition:** `iit_integration` has no privilege of any kind on `iit.logistics_read_audit` (Q7).
+- **T8 addition (r3, V-2):** none of 008's functions (public or internal) has PUBLIC EXECUTE; this holds through 007's global default revoke plus each explicit `REVOKE ALL … FROM PUBLIC`. 007's own regression test for the global default ACL is a prerequisite, not repeated here.
 - **T10 addition:** VIN inputs of 1 character and of the R1 bound are accepted (`found` as appropriate); R1 + 1 is `INPUT_INVALID` (Q2). `vin_candidates` excludes cancelled, finally-closed and voided deals from `candidate_count` (Q3).
