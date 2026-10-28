@@ -7,7 +7,7 @@ pg_ctl -D "$D" stop >/dev/null 2>&1 || true; rm -rf "$D"; mkdir -p "$D"
 initdb -D "$D" -U postgres --auth=trust >/dev/null 2>&1
 pg_ctl -D "$D" -o "-p $PORT -k $D" -l "$D/log" start >/dev/null; sleep 1.5
 P="psql -h $D -p $PORT -U postgres -d iit_local -v ON_ERROR_STOP=1 -q"
-psql -h "$D" -p "$PORT" -U postgres -d postgres -q -c "create database iit_local" -c "create role anon nologin" -c "create role authenticated nologin" -c "create role service_role nologin"
+psql -h "$D" -p "$PORT" -U postgres -d postgres -q -c "create database iit_local" -c "create role anon nologin" -c "create role authenticated nologin" -c "create role service_role nologin" -c "create role authenticator noinherit login"
 UPTO=${1:-999}; rc=0
 for m in "$HERE"/migrations/*.sql; do n=$(basename "$m" | cut -c1-3); [ "$n" -le "$UPTO" ] || continue
   if $P -f "$m" >/dev/null 2>"$D/err"; then echo "APPLY  $(basename "$m")"; else echo "FAIL   $(basename "$m")"; grep -E "ERROR|LINE|DETAIL|CONTEXT" "$D/err" | head -8; rc=1; break; fi
