@@ -48,16 +48,23 @@ CREATE TABLE iit.revoked_credentials (
 SELECT iit.attach_history('iit.revoked_credentials', 'jti');        -- no DELETE (reject_delete)
 CREATE OR REPLACE FUNCTION iit.require_role(p_actor_base44_user_id text, p_required_role text) RETURNS uuid
 LANGUAGE plpgsql SECURITY DEFINER STABLE SET search_path = '' AS $$
-DECLARE v_user uuid; v_claims text; v_role text; v_jti text;
+DECLARE v_user uuid; v_origin text; v_claims text; v_role text; v_jti text;
 BEGIN
-  -- PostgREST path: the request's JWT claims are visible; a token for the Base44 role must carry an unrevoked jti (006)
-  v_claims := pg_catalog.current_setting('request.jwt.claims', true);
-  IF v_claims IS NOT NULL AND v_claims <> '' THEN
-    v_role := v_claims::jsonb ->> 'role'; v_jti := v_claims::jsonb ->> 'jti';
-    IF v_role = 'iit_base44' THEN
-      IF v_jti IS NULL OR v_jti = '' THEN RAISE EXCEPTION 'CREDENTIAL_NO_JTI' USING ERRCODE = '28000'; END IF;
-      IF EXISTS (SELECT 1 FROM iit.revoked_credentials r WHERE r.jti = v_jti) THEN RAISE EXCEPTION 'CREDENTIAL_REVOKED' USING ERRCODE = '28000'; END IF;
-    END IF;
+  -- Credential enforcement is keyed to the ORIGINATING role (the SET ROLE in force when the call began — the same signal
+  -- record_history.origin_role records), never to what the claims say about themselves (Codex D-2 rev 2 P1):
+  --   origin iit_base44  → claims must exist, claims.role must be iit_base44, jti must be present and unrevoked;
+  --   origin anything else (owner SQL, Worker, local tests) with claims naming iit_base44 → identity mismatch, refused;
+  --   origin anything else without such claims → unchanged claim-less behaviour.
+  v_origin := nullif(pg_catalog.current_setting('role', true), 'none');
+  v_claims := nullif(pg_catalog.current_setting('request.jwt.claims', true), '');
+  v_role := v_claims::jsonb ->> 'role'; v_jti := v_claims::jsonb ->> 'jti';
+  IF v_origin = 'iit_base44' THEN
+    IF v_claims IS NULL THEN RAISE EXCEPTION 'CREDENTIAL_NO_CLAIMS' USING ERRCODE = '28000'; END IF;
+    IF v_role IS DISTINCT FROM 'iit_base44' THEN RAISE EXCEPTION 'CREDENTIAL_ROLE_MISMATCH' USING ERRCODE = '28000'; END IF;
+    IF v_jti IS NULL OR v_jti = '' THEN RAISE EXCEPTION 'CREDENTIAL_NO_JTI' USING ERRCODE = '28000'; END IF;
+    IF EXISTS (SELECT 1 FROM iit.revoked_credentials r WHERE r.jti = v_jti) THEN RAISE EXCEPTION 'CREDENTIAL_REVOKED' USING ERRCODE = '28000'; END IF;
+  ELSIF v_role = 'iit_base44' THEN
+    RAISE EXCEPTION 'CREDENTIAL_ROLE_MISMATCH' USING ERRCODE = '28000';
   END IF;
   IF p_actor_base44_user_id IS NULL OR p_actor_base44_user_id = '' THEN RAISE EXCEPTION 'ACTOR_REQUIRED' USING ERRCODE = '28000'; END IF;
   SELECT si.user_id INTO v_user

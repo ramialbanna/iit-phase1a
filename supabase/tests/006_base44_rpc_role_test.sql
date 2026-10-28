@@ -31,7 +31,7 @@ END $$;
 
 -- Z2 as PostgREST would run it: an approved RPC succeeds and the actor/role checks inside still apply
 SET ROLE iit_base44;
-SELECT set_config('request.jwt.claims', '{"role":"iit_base44","iss":"supabase","jti":"tok-1"}', true);
+SELECT set_config('request.jwt.claims', '{"role":"iit_base44","iss":"supabase","jti":"tok-1"}', false);   -- session-wide: outside a transaction a LOCAL setting vanishes at once
 DO $$ DECLARE d uuid; BEGIN
   d := iit.create_manual_deal('manual_exception', 'WAUZZZ8V7JA000600', 'Brown Fig – Manheim', 'b44-de');     -- approved, data_entry actor
   IF d IS NULL THEN RAISE EXCEPTION 'Z2a'; END IF;
@@ -63,6 +63,7 @@ DO $$ DECLARE t record; BEGIN
   BEGIN EXECUTE 'CREATE TABLE iit.z (x int)'; RAISE EXCEPTION 'Z4f DDL'; EXCEPTION WHEN SQLSTATE '42501' THEN NULL; END;
 END $$;
 RESET ROLE;
+SELECT set_config('request.jwt.claims', '', false);
 -- Z2e the write is attributed to the function owner with the originating role recorded (§5.9.2 AC10)
 DO $$ BEGIN
   IF (SELECT exec_role || '/' || origin_role || '/' || actor_kind FROM iit.record_history WHERE table_name='deals' AND record_id = current_setting('iit_test.deal')::uuid) <> 'iit_owner/iit_base44/user' THEN RAISE EXCEPTION 'Z2e attribution'; END IF;
@@ -87,10 +88,38 @@ DO $$ BEGIN
   BEGIN SET LOCAL ROLE tav_worker; RAISE EXCEPTION 'Z6b became worker'; EXCEPTION WHEN SQLSTATE '42501' THEN NULL; END;
   BEGIN SET LOCAL ROLE iit_integration; RAISE EXCEPTION 'Z6c became integration'; EXCEPTION WHEN SQLSTATE '42501' THEN NULL; END;
   BEGIN SET LOCAL ROLE postgres; RAISE EXCEPTION 'Z6d became postgres'; EXCEPTION WHEN SQLSTATE '42501' THEN NULL; END;
-  -- and from this real session an approved RPC still works while a table read is still denied
+  -- and from this real session an approved RPC works WITH the credential's claims while a table read is still denied
+  PERFORM set_config('request.jwt.claims', '{"role":"iit_base44","iss":"supabase","jti":"tok-1"}', true);
   BEGIN PERFORM iit.create_manual_deal('manual_exception', 'WAUZZZ8V7JA000610', 'Brown Fig – ACV', 'b44-de'); EXCEPTION WHEN OTHERS THEN RAISE EXCEPTION 'Z6e approved RPC failed from the authenticator session: %', SQLERRM; END;
   BEGIN PERFORM 1 FROM iit.deals; RAISE EXCEPTION 'Z6f table read from the authenticator session'; EXCEPTION WHEN SQLSTATE '42501' THEN NULL; END;
 END $$;
+-- Z9 enforcement is tied to the ORIGINATING role, not to what the claims say (Codex D-2 rev 2 P1)
+DO $$ BEGIN
+  -- Z9a originating role iit_base44 with NO claims at all → refused (this was the rev-2 bypass path)
+  PERFORM set_config('request.jwt.claims', '', true);
+  BEGIN PERFORM iit.create_manual_deal('manual_exception', 'WAUZZZ8V7JA000630', 'Brown Fig – ACV', 'b44-de'); RAISE EXCEPTION 'Z9a claim-less call accepted from iit_base44'; EXCEPTION WHEN SQLSTATE '28000' THEN IF SQLERRM NOT LIKE 'CREDENTIAL_NO_CLAIMS%' THEN RAISE; END IF; END;
+  -- Z9b originating role iit_base44 but the claims name another role → refused
+  PERFORM set_config('request.jwt.claims', '{"role":"authenticated","iss":"supabase","jti":"tok-1"}', true);
+  BEGIN PERFORM iit.create_manual_deal('manual_exception', 'WAUZZZ8V7JA000631', 'Brown Fig – ACV', 'b44-de'); RAISE EXCEPTION 'Z9b foreign-role claims accepted from iit_base44'; EXCEPTION WHEN SQLSTATE '28000' THEN IF SQLERRM NOT LIKE 'CREDENTIAL_ROLE_MISMATCH%' THEN RAISE; END IF; END;
+  -- Z9c claims without a role → refused the same way
+  PERFORM set_config('request.jwt.claims', '{"iss":"supabase","jti":"tok-1"}', true);
+  BEGIN PERFORM iit.create_manual_deal('manual_exception', 'WAUZZZ8V7JA000632', 'Brown Fig – ACV', 'b44-de'); RAISE EXCEPTION 'Z9c role-less claims accepted from iit_base44'; EXCEPTION WHEN SQLSTATE '28000' THEN IF SQLERRM NOT LIKE 'CREDENTIAL_ROLE_MISMATCH%' THEN RAISE; END IF; END;
+END $$;
+\c iit_local postgres
+-- Z9d claims say iit_base44 but the originating role is NOT iit_base44 (owner session, no SET ROLE) → identity mismatch
+DO $$ BEGIN
+  PERFORM set_config('request.jwt.claims', '{"role":"iit_base44","iss":"supabase","jti":"tok-1"}', true);
+  BEGIN PERFORM iit.require_role('b44-de', 'data_entry'); RAISE EXCEPTION 'Z9d base44 claims accepted from the owner session'; EXCEPTION WHEN SQLSTATE '28000' THEN IF SQLERRM NOT LIKE 'CREDENTIAL_ROLE_MISMATCH%' THEN RAISE; END IF; END;
+  PERFORM set_config('request.jwt.claims', '', true);
+END $$;
+-- Z9e same claims under another originating role that can reach a staff function (iit_integration) → identity mismatch
+SET ROLE iit_integration;
+DO $$ BEGIN
+  PERFORM set_config('request.jwt.claims', '{"role":"iit_base44","iss":"supabase","jti":"tok-1"}', true);
+  BEGIN PERFORM iit.set_consignment(gen_random_uuid(), NULL, NULL, NULL, 'b44-de'); RAISE EXCEPTION 'Z9e base44 claims accepted under iit_integration'; EXCEPTION WHEN SQLSTATE '28000' THEN IF SQLERRM NOT LIKE 'CREDENTIAL_ROLE_MISMATCH%' THEN RAISE; END IF; END;
+  PERFORM set_config('request.jwt.claims', '', true);
+END $$;
+RESET ROLE;
 \c iit_local postgres
 -- Z8 genuine credential revocation (P1): a token without jti is refused; a revoked jti is refused immediately and stays refused;
 -- another token (new jti) keeps working; no RPC can un-revoke (table has no DELETE, no grants to iit_base44)
