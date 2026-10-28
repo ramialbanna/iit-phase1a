@@ -4,8 +4,9 @@
 **Base:** `main` @ `f72924f` (PR #12 merged: non-superuser executor `SET ROLE iit_owner`; `authenticator` memberships SET-only. PR #14 merged: post-application verification and decisions V-1/V-2).
 **Input:** `docs/migrations/008-logistics-requirements-v2.1.md` (TAVOps Logistics handoff, with owner amendment A1 on correlation ids).
 **Remote state:** 001–006 applied to the target project, and the post-application verification **passed** (`docs/preflight/phase-c-post-application-verification-2026-10-28.md`). IIT 007 not finalized.
-**Revision r2 (2026-10-28):** the review verdict was "approve with changes". This revision records the owner decisions on Q1–Q9 (§9) and the required credential-`jti` hardening (§3.1, §10 T15). The only items still open are R1–R2 in §9.
-**Revision r3 (2026-10-28):** rebased onto `f72924f`; prerequisites updated (§0); §6.1 corrected for V-2 (the per-schema default-privilege revoke is ineffective); Q2 and Q8 wording aligned with the recorded decisions.
+**Revision r2 (2026-10-28):** the review verdict was "approve with changes". This revision records the owner decisions on Q1–Q9 (§9) and the required credential-`jti` hardening (§3.1, §10 T15). R1–R2 were left open (approved in r4).
+**Revision r4 (2026-10-28):** Codex review. The `jti` boundary is stated precisely: the Worker guarantees fresh generation (T17); the database validates canonical UUIDv4 form and revocation only and does not claim to tell a random `jti` from a reused business UUID (§3.1). R1 and R2 approved (§9); no decision item remains open.
+**Revision r3 (2026-10-28):** brought onto `f72924f`; prerequisites updated (§0); §6.1 corrected for V-2 (the per-schema default-privilege revoke is ineffective); Q2 and Q8 wording aligned with the recorded decisions.
 
 ## 0. Prerequisites — 008 is not implemented until all of these hold
 1. **PR #12:** satisfied and merged (`c4650bc`).
@@ -13,7 +14,7 @@
 3. **V-2:** migration 007 adds and tests the global default-function privilege revoke (`ALTER DEFAULT PRIVILEGES FOR ROLE iit_owner REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC`, no `IN SCHEMA`) **before any new IIT function is created**. 008 creates functions, so it depends on this.
 4. **Migration 007 is unfinished and blocks implementation of 008.** IIT 007 (Base44 staff-screen reads: `get_deal`, `list_deals`, `list_work_items`, `list_audit_queue`, `get_report`, `list_staff`) must have final contracts, include the V-2 correction and its tests, and be merged. **007 stays reserved for those reads.**
 5. 008 is built on a **fresh branch** from the canonical `main` that results, and this note is re-checked against it (§7). That includes re-evaluating Q4 if 007 introduces a read-audit table.
-6. ~~The owner decides Q1–Q9.~~ Decided in r2 (§9). R1–R2 are confirmed at implementation review.
+6. ~~The owner decides Q1–Q9.~~ Decided in r2 (§9). R1–R2 approved in r4 (§9).
 
 ## 1. Purpose and boundaries
 - **What Logistics gets:** it references `iit.deals.id` (soft reference, Logistics side) and reads IIT **only** through three functions, called by the Logistics Worker via PostgREST with a dedicated JWT whose `role` claim is `iit_logistics_reader`.
@@ -69,8 +70,8 @@
    4. more than 500 elements (VINs: 50) → `INPUT_TOO_LARGE`;
    5. any malformed element → `INPUT_INVALID`:
       - deal id: not a canonical UUID;
-      - VIN (Q2 decided): empty after `upper(btrim())`, or longer than the bound R1. **There is no 17-character rule at this boundary**, because IIT stores VINs without that constraint. Logistics separately enforces a valid 17-character VIN before dispatch;
-      - 3.1 iD: empty after `btrim()`, or longer than the bound R1.
+      - VIN (Q2 decided): empty after `upper(btrim())`, or longer than **32** characters (R1). **There is no 17-character rule at this boundary**, because IIT stores VINs without that constraint. Logistics separately enforces a valid 17-character VIN before dispatch;
+      - 3.1 iD: empty after `btrim()`, or longer than **64** characters (R1).
 4. On a denial: `PERFORM iit._logistics_audit(..., 'denied', code)`, then **RETURN** the denial envelope (no raise).
 5. Otherwise call the helper, `PERFORM iit._logistics_audit(..., 'ok', NULL)`, then RETURN the `ok` envelope.
 
@@ -84,9 +85,12 @@
 - Claims NULL → `CREDENTIAL_NO_CLAIMS`.
 - `claims.role <> 'iit_logistics_reader'` → `CREDENTIAL_ROLE_MISMATCH`.
 - `jti` NULL or empty → `CREDENTIAL_NO_JTI`.
-- **`jti` check (r2, required).** The `jti` must be a Worker-generated canonical v4 UUID.
-  - It's validated **as text before any cast**, against the same pattern as §4: `^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`. A length test (`length(v_jti_text) = 36`) runs first, so oversized values are rejected cheaply.
-  - Anything else → `CREDENTIAL_INVALID_JTI` (`28000`). This covers oversized, malformed, uppercase, braced, nil, non-v4, and identifier-shaped values (VIN, deal number, 3.1 ID, email).
+- **`jti` check (r2, required; scope clarified in r4).**
+  - **Provenance is the Worker's job.** The Worker's credential-issuance path generates a **fresh** UUIDv4 `jti` with its cryptographic random UUID generator (`crypto.randomUUID()`) for every credential it issues, and never derives or copies it from a request, deal, source record or any other identifier. Test T17 proves this on the Worker side.
+  - **The database validates form and revocation only.** The `jti` is validated **as text before any cast**, against the same pattern as §4: `^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`. A length test (`length(v_jti_text) = 36`) runs first, so oversized values are rejected cheaply.
+  - Anything that fails that form → `CREDENTIAL_INVALID_JTI` (`28000`): oversized, malformed, uppercase, braced, nil, and other UUID versions. Non-UUID identifier forms — VINs, deal numbers, 3.1 IDs, emails — are rejected **because they are not canonical lowercase UUIDv4 text**, not because the database recognises them as identifiers.
+  - **What the database does not claim:** a canonical UUIDv4 `jti` can be structurally identical to a UUIDv4 business identifier, including an `iit.deals.id`. The database cannot prove where a well-formed UUIDv4 came from and does not try to distinguish a randomly generated `jti` from a reused business UUID.
+  - **No business-table lookup.** `require_logistics_reader` does **not** query IIT business tables to check whether a `jti` equals an existing business UUID: that would couple credential validation to business data and give the caller an existence side channel. The only table it reads is `iit.revoked_credentials`.
   - The rejected value is not stored or echoed: the raise carries only the code.
   - Only after it passes: `v_jti := v_jti_text::uuid`.
 - **Revocation:** `jti` revoked → `CREDENTIAL_REVOKED`. It reuses the existing `iit.revoked_credentials (jti text PK)` unchanged, through an explicit canonical comparison: `EXISTS (SELECT 1 FROM iit.revoked_credentials r WHERE lower(btrim(r.jti)) = v_jti::text)`.
@@ -180,16 +184,12 @@
 | Q7 | **`iit_integration`:** no privilege on `iit.logistics_read_audit`. Explicitly revoke all privileges and test the denial. |
 | Q8 | **Retention:** retain the append-only Logistics read audit indefinitely for Phase 1. Any deletion/retention mechanism requires a separately reviewed policy and migration. |
 | Q9 | **Batch limits:** 500 for 3.1/deal lookup inputs and 50 for VIN candidate inputs. Response-size and execution-time tests (T16) are required before implementation approval. |
-| jti | **Credential hardening (required):** the Logistics credential `jti` must be a Worker-generated canonical lowercase UUIDv4. `require_logistics_reader` rejects malformed, oversized, nil, non-v4 and identifier-shaped `jti` values with `CREDENTIAL_INVALID_JTI`. `credential_jti` is stored in the Logistics audit as `uuid`; its canonical UUID text is compared to the existing `iit.revoked_credentials.jti` text column. Tests cover valid UUIDv4, malformed, oversized, nil, other UUID versions, VIN-like, deal-like, 3.1-like and email-like values (T15). A rejected `jti` is never stored or echoed (§3.1). |
+| jti | **Credential hardening (required; r4 scope):** the Worker's credential-issuance path generates a fresh UUIDv4 `jti` with its cryptographic random UUID generator for every credential (T17). The database validates canonical lowercase UUIDv4 form and revocation only: `require_logistics_reader` rejects malformed, oversized, nil and non-v4 values with `CREDENTIAL_INVALID_JTI`, and non-UUID identifier forms (VINs, deal numbers, 3.1 IDs, emails) fail that format. It does not claim to distinguish a randomly generated `jti` from a reused UUIDv4 business identifier, and it does not query IIT business tables to find out (no coupling, no existence side channel). `credential_jti` is stored in the Logistics audit as `uuid`; its canonical UUID text is compared to the existing `iit.revoked_credentials.jti` text column. A rejected `jti` is never stored or echoed (§3.1, T15). |
 | V-2 | **Prerequisite (from PR #14):** 007 adds and tests the global default-function privilege revoke before 008 creates any function (§0, §6.1). |
+| R1 | **Approved (r4):** VIN maximum **32** characters after normalization (`upper(btrim())`); 3.1 ID maximum **64** characters after `btrim()`. Longer → `INPUT_INVALID` (§2.3, T10). |
+| R2 | **Approved (r4):** at the largest allowed batch (500 / 500 / 50), the response envelope is at most **1 MB** and local execution time at most **2 seconds**, with representative seeded data (T16). Any measurement on the target project requires separate read-only authorization. |
 
-**Remaining (to confirm at 008 implementation review; not filled silently):**
-- **R1, element length bounds.** Q2 requires "a bounded length" but doesn't set one.
-  - **Builder proposal:** VIN ≤ 32 characters after normalization; 3.1 iD ≤ 64 characters after `btrim()`.
-  - Both are well above real values, and both cap per-element cost.
-- **R2, T16 budgets.** Q9 requires response-size and execution-time tests.
-  - **Builder proposal:** the largest permitted batch returns ≤ 1 MB of envelope and runs in ≤ 2 s on local PG16 with representative seeded data.
-  - The same queries are re-measured with `EXPLAIN ANALYZE` on the target project only after deployment is separately authorized.
+No decision items remain open.
 
 ## 10. Tests required (for the future 008 test file; none written now)
 - **T1–T7 credential**, from a real `authenticator` login:
@@ -225,12 +225,15 @@
   - uppercase v4; braced v4;
   - nil UUID;
   - non-v4: v1 and v7;
-  - identifier-shaped: a VIN, a deal number, a 3.1-style ID, an email;
+  - non-UUID identifier forms, rejected by the UUIDv4 format: a VIN, a deal number, a 3.1-style ID, an email;
   - a JSON non-string `jti` (number, object).
 
   Two positive cases:
   - a valid v4 `jti` is stored in `credential_jti` as that UUID;
   - a revocation entered as uppercase or space-padded text still revokes it (`CREDENTIAL_REVOKED`).
+
+  Deliberately **not** tested: a well-formed UUIDv4 `jti` equal to an existing `iit.deals.id` (or other business UUID) is accepted as a `jti`. That is the documented boundary (§3.1); no test checks a `jti` against business tables.
+- **T17 Worker credential issuance (Worker test suite, not SQL).** The Logistics credential-issuance path produces a `jti` that is a canonical lowercase UUIDv4, is newly generated for each credential (two issuances never share a `jti`), and is not copied from any request field, deal ID, source/3.1 identifier or other input: with those inputs set to known UUIDv4 values, the issued `jti` equals none of them, and the issuance code takes its `jti` only from the cryptographic generator.
 - **T16 batch budgets (Q9).** For the largest permitted batch of each function (500 / 500 / 50, all found, plus a duplicates-heavy variant), the response size and execution time fall within R2. 501 / 501 / 51 is still denied before any data read.
 - **T8 addition:** `iit_integration` has no privilege of any kind on `iit.logistics_read_audit` (Q7).
 - **T8 addition (r3, V-2):** none of 008's functions (public or internal) has PUBLIC EXECUTE; this holds through 007's global default revoke plus each explicit `REVOKE ALL … FROM PUBLIC`. 007's own regression test for the global default ACL is a prerequisite, not repeated here.
