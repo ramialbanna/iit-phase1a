@@ -86,10 +86,31 @@ cd worker && npm ci && npm test && npm run typecheck                            
   to the runner (CLI batch remotely, `psql -1` locally).
 - `supabase db push --dry-run` and `supabase db push` were **not run**. `supabase migration list` was not run.
 
+The checksums and confirmations above describe the packaging as merged in PR #11 (`56ecd4a`).
+
+## Revision after application attempt 1 (branch `fix/001-executor-set-role`)
+
+Attempt 1 failed in 001 before anything was recorded; remote `schema_migrations` exists with zero rows
+(`phase-c-attempt-1-2026-10-28.md`). Two migrations change, by design (fix in `docs/migrations/001.md` §0c, `006.md` rev 4);
+002–005 are byte-identical to PR #11.
+
+| File | SHA-256 at PR #11 (`56ecd4a`) | SHA-256 now |
+|---|---|---|
+| `20261028000101_foundation.sql` | `f54a96de196b13e170722b23338836022119a815d279838dd7c14fd5ff5f4281` | `1cec9f02f61d6ababfff9574a39dce7ff80ea7defd91da48334e208438b9c9ec` |
+| `20261028000102_reports_audit_holds.sql` | `aaf77537…f712d1` | unchanged |
+| `20261028000103_deal_workflow.sql` | `4a15fcc4…eaecdace` | unchanged |
+| `20261028000104_intake.sql` | `e0614e6c…2445acd9` | unchanged |
+| `20261028000105_gate.sql` | `122f339c…6ad12c3a` | unchanged |
+| `20261028000106_base44_rpc_role.sql` | `6d8b8cd9d109a65d9182854636afcca67a540f46cc4473338284cfe3707374b1` | `12fdc0a4bb11da92c922dec19cdf59e5e3d57f150464d218159cc4514c56345d` |
+
+Filenames and versions are unchanged: nothing was recorded remotely, so re-versioning is not needed. The harness now
+applies migrations as a non-superuser `CREATEROLE` login and runs `deploy_executor_test.sql` on a second, test-free
+install; suites pass on local PostgreSQL 16.15 and 17.11.
+
 ## Intended future sequence — NOT RUN, each step needs its own authorization
 
-1. Codex packaging review of this PR; merge only after acceptance.
+1. Codex review of the fix PR; merge only after acceptance.
 2. `supabase db push --dry-run --linked` (lists pending versions only; does not validate SQL).
-3. Separately authorized: `supabase db push --linked` (creates `supabase_migrations` and applies 101–106).
+3. Separately authorized: `supabase db push --linked` (history table already exists, empty; applies 101–106).
 4. Post-application: re-run the Phase B catalog script and diff `s2test` against `s2test-before-2026-10-28.txt`;
    verify roles, `iit` inventory and that D-36/D-40 are still empty.

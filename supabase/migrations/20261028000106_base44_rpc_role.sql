@@ -5,14 +5,24 @@
 -- `authenticator` (Supabase's PostgREST login role) must be a member of iit_base44 — granted here when that role exists.
 -- NOT a credential, NOT schema exposure (those are Supabase configuration steps — docs/d2-deployment-package.md), NOT applied.
 
+-- As in 001: the CREATEROLE executor gets ADMIN on iit_base44 and nothing more (no SET, no INHERIT); that ADMIN is what lets it
+-- grant iit_base44 to authenticator below, which iit_owner could not.
+SET createrole_self_grant = '';
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'iit_base44') THEN CREATE ROLE iit_base44 NOLOGIN NOINHERIT; END IF;
 END $$;
+RESET createrole_self_grant;
 -- PostgREST switches to the JWT role with SET ROLE, which requires membership from its login role (`authenticator` on Supabase).
+-- Options are explicit so they never follow authenticator's own attributes: SET only — no inherited privileges, no grant authority.
 DO $$ BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticator') THEN EXECUTE 'GRANT iit_base44 TO authenticator'; END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticator') THEN
+    EXECUTE 'GRANT iit_base44 TO authenticator WITH ADMIN FALSE, INHERIT FALSE, SET TRUE';
+  END IF;
 END $$;
 
+-- Schema, function and default-privilege grants on iit objects are the owner's: the executor holds no inherited owner
+-- privileges, so on Supabase they fail with 42501 unless issued as iit_owner.
+SET ROLE iit_owner;
 GRANT USAGE ON SCHEMA iit TO iit_base44;
 -- the approved RPC manifest (docs/migrations/006.md §1): every staff-facing entry point of 001–005, nothing else
 GRANT EXECUTE ON FUNCTION
@@ -38,7 +48,6 @@ ALTER DEFAULT PRIVILEGES FOR ROLE iit_owner IN SCHEMA iit REVOKE ALL ON FUNCTION
 -- require_role() refuses any jti listed here — independent of the role, immediately, and permanently. The owner revokes by
 -- inserting the jti (SQL editor, as postgres); no RPC can revoke or un-revoke. Rows are never deleted (history-covered).
 -- ---------------------------------------------------------------------------------------------------------------------
-SET ROLE iit_owner;
 CREATE TABLE iit.revoked_credentials (
   jti text PRIMARY KEY,
   revoked_at timestamptz NOT NULL DEFAULT now(),
