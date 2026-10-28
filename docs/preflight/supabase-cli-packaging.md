@@ -101,7 +101,7 @@ Attempt 1 failed in 001 before anything was recorded; remote `schema_migrations`
 | `20261028000103_deal_workflow.sql` | `4a15fcc4…eaecdace` | unchanged |
 | `20261028000104_intake.sql` | `e0614e6c…2445acd9` | unchanged |
 | `20261028000105_gate.sql` | `122f339c…6ad12c3a` | unchanged |
-| `20261028000106_base44_rpc_role.sql` | `6d8b8cd9d109a65d9182854636afcca67a540f46cc4473338284cfe3707374b1` | `2fd7ad976c1277b3eb047874741052914ec896f1fbaaca7bd746d610f9d29c86` |
+| `20261028000106_base44_rpc_role.sql` | `6d8b8cd9d109a65d9182854636afcca67a540f46cc4473338284cfe3707374b1` | `12fdc0a4bb11da92c922dec19cdf59e5e3d57f150464d218159cc4514c56345d` |
 
 Filenames and versions are unchanged: nothing was recorded remotely, so re-versioning is not needed. The harness now
 applies migrations as a non-superuser `CREATEROLE` login and runs `deploy_executor_test.sql` on a second, test-free

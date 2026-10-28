@@ -7,6 +7,14 @@
 DO $$ DECLARE n int; BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='iit_base44' AND NOT rolcanlogin AND NOT rolsuper AND NOT rolbypassrls AND NOT rolcreaterole AND NOT rolcreatedb) THEN RAISE EXCEPTION 'Z1a role attributes'; END IF;
   IF NOT pg_has_role('authenticator', 'iit_base44', 'MEMBER') THEN RAISE EXCEPTION 'Z1b authenticator cannot assume iit_base44'; END IF;
+  -- Z1b2 exactly one grant, with exactly SET TRUE / INHERIT FALSE / ADMIN FALSE
+  IF (SELECT count(*) FROM pg_auth_members am JOIN pg_roles r ON r.oid=am.roleid JOIN pg_roles m ON m.oid=am.member
+       WHERE r.rolname='iit_base44' AND m.rolname='authenticator') <> 1
+     OR NOT EXISTS (SELECT 1 FROM pg_auth_members am JOIN pg_roles r ON r.oid=am.roleid JOIN pg_roles m ON m.oid=am.member
+       WHERE r.rolname='iit_base44' AND m.rolname='authenticator' AND am.set_option AND NOT am.inherit_option AND NOT am.admin_option)
+    THEN RAISE EXCEPTION 'Z1b2 authenticator membership in iit_base44 is not exactly SET TRUE, INHERIT FALSE, ADMIN FALSE'; END IF;
+  IF NOT pg_has_role('authenticator', 'iit_base44', 'SET') OR pg_has_role('authenticator', 'iit_base44', 'USAGE')
+    THEN RAISE EXCEPTION 'Z1b3 authenticator must be able to SET ROLE iit_base44 and must not inherit it'; END IF;
   IF NOT has_schema_privilege('iit_base44', 'iit', 'USAGE') THEN RAISE EXCEPTION 'Z1c no schema usage'; END IF;
   -- P2: the EXACT allowlist, not a count — every executable function is one of the 27 named signatures and all 27 are present
   SELECT count(*) INTO n FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace WHERE s.nspname='iit' AND has_function_privilege('iit_base44', p.oid, 'EXECUTE');

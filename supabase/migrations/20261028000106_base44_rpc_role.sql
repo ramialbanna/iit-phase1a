@@ -13,8 +13,11 @@ DO $$ BEGIN
 END $$;
 RESET createrole_self_grant;
 -- PostgREST switches to the JWT role with SET ROLE, which requires membership from its login role (`authenticator` on Supabase).
+-- Options are explicit so they never follow authenticator's own attributes: SET only — no inherited privileges, no grant authority.
 DO $$ BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticator') THEN EXECUTE 'GRANT iit_base44 TO authenticator'; END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticator') THEN
+    EXECUTE 'GRANT iit_base44 TO authenticator WITH ADMIN FALSE, INHERIT FALSE, SET TRUE';
+  END IF;
 END $$;
 
 -- Schema, function and default-privilege grants on iit objects are the owner's: the executor holds no inherited owner

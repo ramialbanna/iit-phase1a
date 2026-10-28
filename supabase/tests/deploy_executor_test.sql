@@ -35,14 +35,15 @@ DO $$ BEGIN
 END $$;
 
 -- X4 the complete membership graph of the IIT roles: deployer's CREATEROLE auto-grants (ADMIN only) on all four, deployer's
--- SET-only grant on iit_owner, authenticator in iit_base44 (006). Nothing else — no IIT role is a member of anything either.
+-- SET-only grant on iit_owner, authenticator's SET-only grant on iit_base44 (006). Nothing else — no IIT role is a member of
+-- anything either.
 DO $$ DECLARE extra text; BEGIN
   SELECT string_agg(format('%s<-%s(by %s a=%s i=%s s=%s)', r.rolname, m.rolname, g.rolname, am.admin_option, am.inherit_option, am.set_option), '; ') INTO extra
     FROM pg_auth_members am JOIN pg_roles r ON r.oid=am.roleid JOIN pg_roles m ON m.oid=am.member JOIN pg_roles g ON g.oid=am.grantor
    WHERE (r.rolname IN ('iit_owner','iit_integration','tav_worker','iit_base44') OR m.rolname IN ('iit_owner','iit_integration','tav_worker','iit_base44'))
      AND NOT (m.rolname='deployer' AND g.rolsuper AND am.admin_option AND NOT am.inherit_option AND NOT am.set_option)
      AND NOT (r.rolname='iit_owner' AND m.rolname='deployer' AND g.rolname='deployer' AND am.set_option AND NOT am.inherit_option AND NOT am.admin_option)
-     AND NOT (r.rolname='iit_base44' AND m.rolname='authenticator' AND NOT am.admin_option);
+     AND NOT (r.rolname='iit_base44' AND m.rolname='authenticator' AND am.set_option AND NOT am.inherit_option AND NOT am.admin_option);
   IF extra IS NOT NULL THEN RAISE EXCEPTION 'X4 unexpected IIT role memberships: %', extra; END IF;
 END $$;
 
