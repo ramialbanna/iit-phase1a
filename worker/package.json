@@ -1,0 +1,19 @@
+{
+  "name": "iit-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "IIT Phase 1a Worker: §6 gate routes, vAuto intake poll, gate attempt expiry. Local review package; not deployable as committed.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test --experimental-strip-types test/*.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json"
+  },
+  "dependencies": { "pg": "8.23.1" },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261004.1",
+    "@types/node": "22.20.5",
+    "@types/pg": "8.23.1",
+    "typescript": "6.0.3",
+    "wrangler": "4.146.0"
+  }
+}
