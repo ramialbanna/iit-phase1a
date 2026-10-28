@@ -90,7 +90,7 @@ Content-Type: application/json
 - **Never:** the `service_role` key as the Base44 credential (broadly privileged, bypasses RLS, defeats the narrow door); the Management API path for app writes; a token without a `jti`.
 
 ## 7. Application sequence — each step needs separate explicit authorization, after Codex review of this package
-1. Apply migrations 001–006 to project `fqxfrtfiysbuctcccudb` (as the owner, via the SQL editor or CLI), in order, in one session; run the read-only verification queries from §5 on the live project (schema, roles, function count 27, no table privileges for `iit_base44`, `authenticator` membership).
+1. Apply migrations 001–006 to project `fqxfrtfiysbuctcccudb` with `supabase db push --linked` (executor `postgres`: `CREATEROLE`, not superuser — 001 grants it SET-only membership in `iit_owner`, see `docs/migrations/001.md` §0c), in order; run the read-only verification queries from §5 on the live project (schema, roles, function count 27, no table privileges for `iit_base44`, `authenticator` membership).
 2. Expose `iit` to PostgREST: Supabase Dashboard → Project Settings → API → **Exposed schemas**: add `iit` (keeps `public`); **Extra search path** unchanged. Verify `GET /rest/v1/` with the `iit_base44` token and `Accept-Profile: iit` lists only the 27 RPC functions and no tables.
 3. Mint the credential (§6) and run the live denial checks from §5 with it: approved RPC with a real staff identity, unapproved RPC, `GET /rest/v1/deals` (must be 404/401), the same with the anon key only.
 4. Store the credential in Base44 (§6), publish.

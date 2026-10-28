@@ -12,6 +12,10 @@
 -- ---------------------------------------------------------------------------------------------------------------------
 -- 0. roles and schema
 -- ---------------------------------------------------------------------------------------------------------------------
+-- The executor on Supabase is `postgres`: CREATEROLE, not superuser. Since PG16 such a creator is auto-granted ADMIN on each
+-- role it creates (SET FALSE, INHERIT FALSE) plus whatever createrole_self_grant adds; pin that GUC empty so no SET or INHERIT
+-- membership in iit_integration / tav_worker / iit_owner can come from the session's configuration.
+SET createrole_self_grant = '';
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'iit_owner')       THEN CREATE ROLE iit_owner NOLOGIN; END IF;
   -- iit_integration: the role EXECUTE on staff-facing functions is granted to. Rev 4: NO BYPASSRLS — that attribute needs a
@@ -21,16 +25,31 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'iit_integration') THEN CREATE ROLE iit_integration NOLOGIN; END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tav_worker')      THEN CREATE ROLE tav_worker NOLOGIN; END IF;
 END $$;
+RESET createrole_self_grant;
+
+-- CREATE SCHEMA ... AUTHORIZATION and every later SET ROLE iit_owner (here and in 002–006) need SET on iit_owner, which the
+-- auto-grant withholds (first remote attempt: 42501 "must be able to SET ROLE"). SET only: INHERIT FALSE keeps iit_owner's
+-- privileges unusable without an explicit SET ROLE; ADMIN FALSE adds no grant authority. Kept for the life of the schema:
+-- 002–006 and any later migration switch to iit_owner the same way.
+GRANT iit_owner TO CURRENT_USER WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
+DO $$ BEGIN
+  IF NOT (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user)
+     AND pg_catalog.pg_has_role(current_user, 'iit_owner', 'USAGE') THEN
+    RAISE EXCEPTION '001: executor % inherits iit_owner privileges; only SET membership is allowed', current_user;
+  END IF;
+END $$;
 
 CREATE SCHEMA IF NOT EXISTS iit AUTHORIZATION iit_owner;
+
+-- Schema grants and default privileges run as the owner: the executor holds no owner privileges (no INHERIT), so issued as
+-- the executor they fail with 42501 on Supabase.
+SET ROLE iit_owner;
+SET search_path = pg_catalog;
 REVOKE ALL ON SCHEMA iit FROM PUBLIC;
 GRANT USAGE ON SCHEMA iit TO iit_integration, tav_worker;
 -- Default privileges: nothing to PUBLIC/anon/authenticated. Table access for the integration is direct and privileged in
 -- Supabase anyway (§2.5 risk 1); we grant it explicitly per table below so local tests mirror that.
 ALTER DEFAULT PRIVILEGES FOR ROLE iit_owner IN SCHEMA iit REVOKE ALL ON FUNCTIONS FROM PUBLIC;
-
-SET ROLE iit_owner;
-SET search_path = pg_catalog;
 
 -- ---------------------------------------------------------------------------------------------------------------------
 -- 1. staff identity (§2.1, §4 P4): our own users / roles / user_roles / staff_identities / external_user_map
