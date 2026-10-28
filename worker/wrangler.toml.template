@@ -1,0 +1,25 @@
+# TEMPLATE ONLY — no deployable configuration is committed (docs/worker.md). Copy to wrangler.toml locally; never commit it.
+name = "iit-worker"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+compatibility_flags = ["nodejs_compat"]
+
+[triggers]
+crons = ["*/5 * * * *"]            # scheduled(): expire_stale_attempts + vAuto poll
+
+[vars]
+IIT_ROUTES_ENABLED = "false"       # every route 404 until flipped to "true" on purpose
+IIT_APPSHEET_APP_ID = ""           # the app whose 3.1 rows the gate reads (Find only)
+IIT_APPSHEET_TABLE = "01_MY CAR LIST"
+IIT_ALLOW_EXTERNAL_HOSTS = ""      # "api.appsheet.com,<vauto api host>,<vauto token host>"
+VAUTO_BASE_URL = ""
+VAUTO_TOKEN_URL = ""
+VAUTO_ENTITY_LOGICAL_ID = ""
+VAUTO_POLL_LOOKBACK_MINUTES = "180"
+VAUTO_PAGE_SIZE = "100"
+
+# Secrets (wrangler secret put): IIT_CRED_<INTEGRATION> (one per AppSheet app / Zap), IIT_APPSHEET_APP_KEY,
+# VAUTO_CLIENT_ID, VAUTO_CLIENT_SECRET, and either a HYPERDRIVE binding or IIT_DB_URL (verify-full).
+# [[hyperdrive]]
+# binding = "HYPERDRIVE"
+# id = ""
