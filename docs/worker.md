@@ -1,6 +1,6 @@
 # Worker v0.1 — §6 gate routes, vAuto intake poll, gate attempt expiry
 
-Status: **local review package, rev 3** (Codex v0.1 P1/P1/P2 and rev-2 P2 applied). `cd worker && npm test` → 73 tests pass; `npm run typecheck` clean (TypeScript 6.0.3 strict, `erasableSyntaxOnly`). No `wrangler.toml` is committed (template only); nothing is deployed; no live integration was contacted. For Codex review.
+Status: **local review package, rev 3 — Codex ACCEPT 2026-10-28** (v0.1 P1/P1/P2 and rev-2 P2 applied). Deployment gated by D-40, D-46, live vAuto verification I-V1–I-V3 and explicit authorization. `cd worker && npm test` → 73 tests pass; `npm run typecheck` clean (TypeScript 6.0.3 strict, `erasableSyntaxOnly`). No `wrangler.toml` is committed (template only); nothing is deployed; no live integration was contacted. For Codex review.
 
 Base: the S2 spike Worker v0.79 (Codex-accepted). Carried over **verbatim** except headers/env names: `db_adapter.ts` (pg 8.23.1, strict URL, Hyperdrive-internal vs verify-full, no pipelining, public close only), `deadline.ts`, `read31.ts` (the AppSheet `Find`), and the adapter / read-fixture tests. Dropped: everything S2-specific (identity probe, prepare/commit fault injection, reconcile, `s2test` functions). The spike's `package-lock.json` is reused unchanged (same pinned dependency; no new dependency).
 
