@@ -22,6 +22,14 @@ INSERT INTO iit.legacy_31_statuses VALUES
   ('In-Progress', true, 'S2 read-back'), ('Same Day Deal', true, 'S2 read-back'),
   ('Rescheduled', false, '§6.3'), ('Canceled', false, '§6.3'), ('Canceled In Scheduling', false, '§6.3');
 SELECT iit.attach_history('iit.legacy_31_statuses', 'status', true);
+-- Which authenticated integration may perform which action (§6.2 caller identity + Codex 005 P1: the first caller must be
+-- proven eligible for the action, not merely authenticated). SEEDED EMPTY (D-40): the owner's S2 inventory (each AppSheet app and
+-- each Zap, and the action it performs) fills it; until then every authorize call is denied integration_not_allowed.
+CREATE TABLE iit.gate_integration_actions (
+  caller_integration text NOT NULL, action text NOT NULL, note text NOT NULL,
+  PRIMARY KEY (caller_integration, action)
+);
+SELECT iit.attach_history('iit.gate_integration_actions', 'caller_integration,action', true);
 -- targets proven (S2 B8) to dedupe by action_key: a duplicate grant is harmless there. SEEDED EMPTY (D-36): no target is proven.
 CREATE TABLE iit.gate_idempotent_targets (
   action text PRIMARY KEY, note text NOT NULL
@@ -183,6 +191,7 @@ BEGIN
     SELECT (value #>> '{}')::int INTO v_max_age FROM iit.system_settings WHERE key = 'gate_31_read_max_age_seconds';
     SELECT active INTO v_active FROM iit.legacy_31_statuses WHERE status = p_read_31_status;
     v_deny := CASE
+      WHEN NOT EXISTS (SELECT 1 FROM iit.gate_integration_actions x WHERE x.caller_integration = p_caller_integration AND x.action = p_action) THEN 'integration_not_allowed'   -- P1 allowlist, first
       WHEN p_read_31_status IS NULL OR p_read_31_at IS NULL THEN 'read_31_failed'
       WHEN p_read_31_at < pg_catalog.clock_timestamp() - pg_catalog.make_interval(secs => v_max_age) OR p_read_31_at > pg_catalog.clock_timestamp() + interval '5 seconds' THEN 'read_31_stale'
       WHEN v_active IS NULL THEN 'status_31_unknown'

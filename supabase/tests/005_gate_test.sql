@@ -44,6 +44,14 @@ DO $$ DECLARE r record; BEGIN
 END $$;
 
 -- Y2 authorize_and_consume: the 3.1 read, denials kept, grant, single executor, key reuse
+-- P1 allowlist: with an EMPTY gate_integration_actions nothing is granted; TEST rows are then added for the integrations used below
+DO $$ DECLARE r jsonb; BEGIN
+  r := iit.authorize_and_consume('package:IID-D1:v1', 'IID-D1', 'package', 'appsheet:31', 'run-0', NULL, 'In-Progress', 'In-Progress', now());
+  IF (r ->> 'allowed')::boolean OR r ->> 'reason' <> 'integration_not_allowed' THEN RAISE EXCEPTION 'Y2-0 granted with an empty allowlist: %', r; END IF;
+  INSERT INTO iit.gate_integration_actions VALUES ('appsheet:31','package','TEST'), ('appsheet:31','dispatch','TEST'), ('zap:texts','text','TEST');
+  r := iit.authorize_and_consume('text:IID-D1:p1', 'IID-D1', 'text', 'appsheet:31', 'run-0b', NULL, 'In-Progress', 'In-Progress', now());
+  IF (r ->> 'allowed')::boolean OR r ->> 'reason' <> 'integration_not_allowed' THEN RAISE EXCEPTION 'Y2-1 integration allowed for an action it is not listed for: %', r; END IF;
+END $$;
 DO $$ DECLARE r jsonb; a1 uuid; act uuid; BEGIN
   BEGIN PERFORM iit.authorize_and_consume('', 'IID-D1', 'package', 'appsheet:31', 'run-1', NULL, NULL, 'In-Progress', now()); RAISE EXCEPTION 'Y2a'; EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE 'GATE_ARGS%' THEN RAISE; END IF; END;
   r := iit.authorize_and_consume('package:IID-D1:v1', 'IID-D1', 'package', 'appsheet:31', 'run-1', 'de@test', 'In-Progress', NULL, NULL);
@@ -55,7 +63,7 @@ DO $$ DECLARE r jsonb; a1 uuid; act uuid; BEGIN
   r := iit.authorize_and_consume('package:IID-D1:v1', 'IID-D1', 'package', 'appsheet:31', 'run-1', 'de@test', 'In-Progress', 'Rescheduled', now());
   IF (r ->> 'allowed')::boolean OR r ->> 'reason' <> 'status_31_inactive' THEN RAISE EXCEPTION 'Y2e %', r; END IF;
   act := (r ->> 'action_id')::uuid;
-  IF (SELECT state FROM iit.gated_actions WHERE id = act) <> 'denied' OR (SELECT count(*) FROM iit.gated_action_events WHERE action_id = act AND event = 'denied') <> 4 THEN RAISE EXCEPTION 'Y2f denials not kept'; END IF;
+  IF (SELECT state FROM iit.gated_actions WHERE id = act) <> 'denied' OR (SELECT count(*) FROM iit.gated_action_events WHERE action_id = act AND event = 'denied') <> 5 THEN RAISE EXCEPTION 'Y2f denials not kept'; END IF;
   r := iit.authorize_and_consume('package:IID-E7:v3', 'IID-E7', 'package', 'appsheet:31', 'run-1', NULL, 'In-Progress', 'In-Progress', now());
   IF (r ->> 'allowed')::boolean OR r ->> 'reason' <> 'hold' THEN RAISE EXCEPTION 'Y2g %', r; END IF;
   r := iit.authorize_and_consume('package:IID-NOPE:v1', 'IID-NOPE', 'package', 'appsheet:31', 'run-1', NULL, 'In-Progress', 'In-Progress', now());
