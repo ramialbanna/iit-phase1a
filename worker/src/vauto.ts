@@ -23,11 +23,15 @@ const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object
 
 /** I-V1: RQL date predicate. The spec shows `eq(vehicle.make,Toyota)`; the comparison operator for timestamps is assumed `ge`. */
 export function rqlSince(sinceIso: string): string { return `ge(lastModified,${sinceIso})`; }
-/** I-V3: page cursor. `next` is treated as an absolute URL when it parses as one, else as a `{start},{count}` limit token. */
-export function nextUrl(baseUrl: string, firstUrl: string, next: string | null): string | null {
-  if (!next) return null;
-  try { const u = new URL(next); return u.toString(); } catch { /* not a URL */ }
-  const u = new URL(firstUrl); u.searchParams.set("limit", next); return u.toString();
+/** I-V3: page cursor. `next` is treated as an absolute URL when it parses as one (and MUST share the base URL's origin — a
+ *  cursor pointing elsewhere is refused, so the bearer token never follows a foreign link), else as a `{start},{count}` token. */
+export function nextUrl(baseUrl: string, firstUrl: string, next: string | null): { url: string | null } | { refused: string } {
+  if (!next) return { url: null };
+  let abs: URL | null = null;
+  try { abs = new URL(next); } catch { abs = null; }
+  if (abs) return abs.origin === new URL(baseUrl).origin ? { url: abs.toString() } : { refused: "next_foreign_origin" };
+  if (!/^\d+,\d+$/.test(next)) return { refused: "next_unrecognized" };
+  const u = new URL(firstUrl); u.searchParams.set("limit", next); return { url: u.toString() };
 }
 
 async function fetchJson(d: VautoDeps, url: string, init: RequestInit, msLeft: number): Promise<{ ok: true; status: number; body: unknown } | { ok: false; error: VautoError; detail: string }> {
@@ -82,7 +86,9 @@ export async function listAppraisalsSince(d: VautoDeps, sinceIso: string, budget
     if (!r.ok) return { ok: false, error: r.error, detail: `page_${pages + 1}:${r.detail}`, items, pages };
     if (!isObj(r.body) || !Array.isArray(r.body.items)) return { ok: false, error: "VAUTO_MALFORMED", detail: `page_${pages + 1}:items_not_array`, items, pages };
     items.push(...r.body.items); pages++;
-    url = nextUrl(d.baseUrl, first.toString(), typeof r.body.next === "string" ? r.body.next : null);
+    const nx = nextUrl(d.baseUrl, first.toString(), typeof r.body.next === "string" ? r.body.next : null);
+    if ("refused" in nx) return { ok: false, error: "VAUTO_MALFORMED", detail: `page_${pages}:${nx.refused}`, items, pages };
+    url = nx.url;
   }
   if (url) return { ok: false, error: "VAUTO_HTTP", detail: "max_pages", items, pages };
   return { ok: true, items, pages };

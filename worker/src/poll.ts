@@ -21,15 +21,20 @@ export async function runPoll(d: PollDeps): Promise<PollSummary> {
   const t0 = d.now(); const end = t0 + d.cfg.timeouts.pollBudgetMs;
   const since = new Date(t0 - d.cfg.vauto.pollLookbackMinutes * 60_000).toISOString();
   const sum: PollSummary = { since, listed: 0, pages: 0, list_error: null, skipped_no_id: 0, skipped_not_object: 0, skipped_allowlist: 0, stored: 0, unchanged: 0, actions: {}, db_errors: 0, budget_exhausted: false, elapsed_ms: 0 };
-  const list = await listAppraisalsSince(d.vauto, since, Math.max(1, end - d.now() - 2 * d.cfg.timeouts.dbCallTimeoutMs));
+  // the poll budget is an ABSOLUTE deadline (Codex Worker v0.1 P2): the listing gets what is left minus a reserve for the
+  // ingest calls, and every ingest call is bounded by the smaller of its own timeout and the time left; nothing starts after `end`.
+  const reserve = 2 * d.cfg.timeouts.dbCallTimeoutMs;
+  const listBudget = end - d.now() - reserve;
+  const list = listBudget > 0 ? await listAppraisalsSince(d.vauto, since, listBudget) : { ok: false as const, error: "VAUTO_TIMEOUT", detail: "no_budget_for_listing", items: [], pages: 0 };
   sum.listed = list.items.length; sum.pages = list.pages; sum.list_error = list.ok ? null : `${list.error}:${list.detail}`;
   for (const raw of list.items) {
-    if (d.now() >= end) { sum.budget_exhausted = true; break; }
+    const left = end - d.now();
+    if (left <= 0) { sum.budget_exhausted = true; break; }
     const sz = sanitizeAppraisal(raw);
     if (!sz.ok) { if (sz.reason === "no_id") sum.skipped_no_id++; else if (sz.reason === "not_object") sum.skipped_not_object++; else { sum.skipped_allowlist++; d.log({ event: "poll.allowlist_violation", detail: sz.detail }); } continue; }
     const r = await callOne<Record<string, unknown>>(d.db, "SELECT iit.ingest_vauto_observation($1,$2,$3::jsonb,$4::timestamptz) AS r",
-      [sz.value.id, d.cfg.vauto.accountContext, JSON.stringify(sz.value.body), new Date(d.now()).toISOString()], d.cfg.timeouts.dbCallTimeoutMs, d.cfg.timeouts.cleanupTimeoutMs);
-    if (!r.ok) { sum.db_errors++; d.log({ event: "poll.ingest_failed", error: r.error, detail: r.detail }); continue; }
+      [sz.value.id, d.cfg.vauto.accountContext, JSON.stringify(sz.value.body), new Date(d.now()).toISOString()], Math.min(d.cfg.timeouts.dbCallTimeoutMs, left), d.cfg.timeouts.cleanupTimeoutMs);
+    if (!r.ok) { sum.db_errors++; if (r.error === "DB_TIMEOUT" && d.now() >= end) sum.budget_exhausted = true; d.log({ event: "poll.ingest_failed", error: r.error, detail: r.detail }); if (sum.budget_exhausted) break; continue; }
     const out = r.value;
     if (out.outcome === "unchanged") sum.unchanged++; else sum.stored++;
     const act = typeof out.action === "string" ? out.action : "unknown";

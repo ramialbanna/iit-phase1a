@@ -41,5 +41,15 @@ export function validateConfig(c: WorkerConfig): string | null {
   if (!(t.vautoHttpTimeoutMs < t.pollBudgetMs)) return "vAuto HTTP timeout must be below the poll budget";
   if (!(c.vauto.pollLookbackMinutes > 0 && Number.isInteger(c.vauto.pollLookbackMinutes))) return "poll lookback must be a positive integer";
   if (!(c.vauto.pageSize > 0 && c.vauto.pageSize <= 100)) return "vAuto page size must be 1..100 (API max)";
+  // duplicate credential VALUES would make the caller's identity ambiguous (Codex Worker v0.1 P1): refused at load, so every
+  // route answers CONFIG_INVALID until the secrets are distinct. Only the NAMES are reported.
+  const seen = new Map<string, string>();
+  for (const [name, secret] of Object.entries(c.credentials)) {
+    const other = seen.get(secret);
+    if (other !== undefined) return `credentials ${other} and ${name} share one secret value`;
+    seen.set(secret, name);
+  }
+  if (c.vauto.baseUrl && !c.vauto.baseUrl.startsWith("https://")) return "VAUTO_BASE_URL must be https";
+  if (c.vauto.tokenUrl && !c.vauto.tokenUrl.startsWith("https://")) return "VAUTO_TOKEN_URL must be https";
   return null;
 }

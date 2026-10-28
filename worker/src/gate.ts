@@ -2,7 +2,7 @@
 // Pure functions: no I/O, so the contract tests exercise exactly the deployed logic.
 import type { WorkerConfig } from "./types.ts";
 
-export type RouteReason = "ROUTES_DISABLED" | "CREDENTIAL_UNKNOWN" | "HOST_NOT_ALLOWLISTED" | "APP_UNCONFIGURED";
+export type RouteReason = "ROUTES_DISABLED" | "CREDENTIAL_UNKNOWN" | "HOST_NOT_ALLOWLISTED" | "APP_UNCONFIGURED" | "ORIGIN_NOT_VAUTO";
 export type Decision = { ok: true; integration: string } | { ok: false; reason: RouteReason; status: number };
 
 /** Constant-time string compare (no early exit on the first differing byte). */
@@ -13,12 +13,13 @@ export function safeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
-/** The authenticated integration is the NAME whose secret matches the presented credential — never a body field. */
+/** The authenticated integration is the NAME whose secret matches the presented credential — never a body field.
+ *  If more than one name matches (duplicate secrets, refused at config validation too) nobody is identified. */
 export function identify(cfg: WorkerConfig, presented: string | null): string | null {
   if (!presented) return null;
-  let found: string | null = null;
-  for (const [name, secret] of Object.entries(cfg.credentials)) if (safeEqual(presented, secret)) found = name;
-  return found;
+  const matches: string[] = [];
+  for (const [name, secret] of Object.entries(cfg.credentials)) if (safeEqual(presented, secret)) matches.push(name);
+  return matches.length === 1 ? matches[0]! : null;
 }
 
 export function routeGate(cfg: WorkerConfig, presented: string | null): Decision {
@@ -30,14 +31,20 @@ export function routeGate(cfg: WorkerConfig, presented: string | null): Decision
 
 export type Outbound = { kind: "appsheet"; host: string; appId: string } | { kind: "vauto"; url: string };
 
-/** Any outbound call: the AppSheet app must be the configured one and every host must be allowlisted. */
+/** Any outbound call: the AppSheet app must be the configured one and its host allowlisted. A vAuto request (which carries
+ *  the vAuto client secret or bearer token) may go ONLY to the exact origin of the configured vAuto base URL or token URL —
+ *  never to another allowlisted host (Codex Worker v0.1 P1: credentials must not cross trust boundaries). */
 export function outboundGate(cfg: WorkerConfig, o: Outbound): { ok: true } | { ok: false; reason: RouteReason } {
   if (o.kind === "appsheet") {
     if (!cfg.appsheet.appId || o.appId !== cfg.appsheet.appId) return { ok: false, reason: "APP_UNCONFIGURED" };
     return cfg.appsheet.allowedHosts.includes(o.host) ? { ok: true } : { ok: false, reason: "HOST_NOT_ALLOWLISTED" };
   }
-  const host = safeHost(o.url);
-  return host && cfg.appsheet.allowedHosts.includes(host) ? { ok: true } : { ok: false, reason: "HOST_NOT_ALLOWLISTED" };
+  const origin = safeOrigin(o.url);
+  const allowed = [safeOrigin(cfg.vauto.baseUrl), safeOrigin(cfg.vauto.tokenUrl)].filter((x): x is string => x !== null);
+  if (!origin || !allowed.includes(origin)) return { ok: false, reason: "ORIGIN_NOT_VAUTO" };
+  const host = new URL(origin).hostname;
+  return cfg.appsheet.allowedHosts.includes(host) ? { ok: true } : { ok: false, reason: "HOST_NOT_ALLOWLISTED" };
 }
 
-function safeHost(u: string): string | null { try { return new URL(u).hostname; } catch { return null; } }
+/** Scheme + host + port only; https required. */
+export function safeOrigin(u: string): string | null { try { const x = new URL(u); return x.protocol === "https:" ? x.origin : null; } catch { return null; } }

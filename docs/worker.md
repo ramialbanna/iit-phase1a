@@ -1,8 +1,15 @@
 # Worker v0.1 — §6 gate routes, vAuto intake poll, gate attempt expiry
 
-Status: **local review package, rev 1.** `cd worker && npm test` → 70 tests pass; `npm run typecheck` clean (TypeScript 6.0.3 strict, `erasableSyntaxOnly`). No `wrangler.toml` is committed (template only); nothing is deployed; no live integration was contacted. For Codex review.
+Status: **local review package, rev 2** (Codex v0.1 P1/P1/P2 applied). `cd worker && npm test` → 73 tests pass; `npm run typecheck` clean (TypeScript 6.0.3 strict, `erasableSyntaxOnly`). No `wrangler.toml` is committed (template only); nothing is deployed; no live integration was contacted. For Codex review.
 
 Base: the S2 spike Worker v0.79 (Codex-accepted). Carried over **verbatim** except headers/env names: `db_adapter.ts` (pg 8.23.1, strict URL, Hyperdrive-internal vs verify-full, no pipelining, public close only), `deadline.ts`, `read31.ts` (the AppSheet `Find`), and the adapter / read-fixture tests. Dropped: everything S2-specific (identity probe, prepare/commit fault injection, reconcile, `s2test` functions). The spike's `package-lock.json` is reused unchanged (same pinned dependency; no new dependency).
+
+## 0. Rev 2 — Codex rev-1 findings
+| # | Finding | Change | Control |
+|---|---|---|---|
+| P1 | vAuto credentials (client secret, bearer token) could be sent to any allowlisted host | `outboundGate` for `vauto` requests requires the exact **https origin** of `VAUTO_BASE_URL` or `VAUTO_TOKEN_URL` (scheme, host, port) **and** an allowlisted host (`ORIGIN_NOT_VAUTO` otherwise); a `next` cursor on a foreign origin is refused (`next_foreign_origin`), items already fetched are kept; non-https vAuto URLs refused at config load | contract (appsheet host, other port, http, look-alike host, unconfigured vAuto URL all refused), vauto (foreign `next` → no third request; token to a non-vAuto origin → no request) |
+| P1 | Duplicate secret values made identity ambiguous (last match won) | `identify` returns a name only when **exactly one** secret matches; `validateConfig` refuses duplicate values at load (every route → `500 CONFIG_INVALID`, names only in the message) | contract: duplicate → 500, value absent from the message, `identify` null |
+| P2 | The poll budget bounded only the start of each item, so a slow database could extend the run | Absolute deadline: the listing gets `budget − reserve`; every ingest call is bounded by `min(dbCallTimeoutMs, time left)`; nothing starts after the deadline; a timeout at the deadline marks `budget_exhausted` and stops | poll: six 80-ms ingests under a 400-ms budget finish within budget + close bound with `budget_exhausted`; no budget left → nothing listed |
 
 ## 1. What the Worker does (and the database decides)
 | Concern | Worker | Database (001–005) |

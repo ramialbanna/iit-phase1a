@@ -35,7 +35,8 @@ test("list: token, then pages followed through `next` (absolute URL and limit to
   assert.equal(u1.searchParams.get("filter"), rqlSince("2026-10-27T00:00:00.000Z")); assert.equal(u1.searchParams.get("limit"), "1,2"); assert.equal(u1.searchParams.get("entityLogicalId"), "ent-1");
   assert.equal((calls[1]!.init.headers as Record<string, string>).Authorization, "Bearer T"); assert.equal(calls[1]!.init.method, "GET");
   assert.equal(new URL(calls[3]!.url).searchParams.get("limit"), "5,2");
-  assert.equal(nextUrl("b", "https://x/a?limit=1,2", null), null);
+  assert.deepEqual(nextUrl("https://vauto.example/api", "https://x/a?limit=1,2", null), { url: null });
+  assert.deepEqual(nextUrl("https://vauto.example/api", "https://x/a?limit=1,2", "garbage"), { refused: "next_unrecognized" });
 });
 test("list: a failing later page returns the items already fetched WITH the error; malformed page likewise", async () => {
   const { f } = script((_u, _i, n) => n === 1 ? J(200, { access_token: "T" }) : n === 2 ? J(200, { items: [{ id: "1" }], next: "3,2" }) : J(503, {}));
@@ -43,6 +44,16 @@ test("list: a failing later page returns the items already fetched WITH the erro
   assert.equal(r.ok, false); assert.deepEqual(r.items, [{ id: "1" }]); assert.equal((r as { detail: string }).detail, "page_2:http_503");
   const m = script((_u, _i, n) => n === 1 ? J(200, { access_token: "T" }) : J(200, { items: "nope" }));
   assert.equal((await listAppraisalsSince(base(m.f), "s", 5000) as { error: string }).error, "VAUTO_MALFORMED");
+});
+test("P1: a `next` cursor on a foreign origin is refused — the bearer token never follows it; the items already fetched are kept", async () => {
+  const { f, calls } = script((_u, _i, n) => n === 1 ? J(200, { access_token: "T" }) : J(200, { items: [{ id: "1" }], next: "https://evil.example/api/appraisals?limit=3,2" }));
+  const r = await listAppraisalsSince(base(f), "s", 5000);
+  assert.equal(r.ok, false); assert.equal((r as { detail: string }).detail, "page_1:next_foreign_origin"); assert.deepEqual(r.items, [{ id: "1" }]);
+  assert.equal(calls.length, 2, "no third request");
+  // and the gate itself refuses a token request to a non-vAuto origin even when the host is allowlisted
+  const g = script(() => J(200, { access_token: "T" }));
+  const t = await getToken(base(g.f, { outboundCheck: (o) => (o.kind === "vauto" && o.url.startsWith("https://vauto.example/") ? { ok: true } : { ok: false, reason: "ORIGIN_NOT_VAUTO" }), tokenUrl: "https://api.appsheet.com/token" }), 500);
+  assert.equal((t as { error: string }).error, "ORIGIN_NOT_VAUTO"); assert.equal(g.calls.length, 0);
 });
 test("list: outbound gate refusal makes no request; a hanging page times out; max pages is bounded", async () => {
   const s = script(() => J(200, {}));

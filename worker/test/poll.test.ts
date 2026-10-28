@@ -39,6 +39,19 @@ test("poll: items without an id or not objects are skipped and counted; the budg
   const sum = await runPoll({ ...deps(db, vautoWith([{ nope: 1 }, "str", appr("1", 1), appr("2", 2), appr("3", 3)]), [], now), cfg: { ...cfg, timeouts: { ...cfg.timeouts, pollBudgetMs: 1000, dbCallTimeoutMs: 50 } } });
   assert.equal(sum.skipped_no_id, 1); assert.equal(sum.skipped_not_object, 1); assert.ok(sum.budget_exhausted || sum.stored === 3);
 });
+test("P2: the poll budget is an absolute deadline — a slow database cannot extend the run past it; the last call is cut to the time left", async () => {
+  const db = new FakeConnector(() => delay(80, [{ r: { outcome: "stored", action: "created" } }]));   // each ingest wants 80 ms
+  const t0 = Date.now();
+  const six = [1, 2, 3, 4, 5, 6].map((i) => appr(String(i), i));
+  const sum = await runPoll({ ...deps(db, vautoWith(six), [], Date.now), cfg: { ...cfg, timeouts: { ...cfg.timeouts, pollBudgetMs: 400, dbCallTimeoutMs: 100 } } });
+  const elapsed = Date.now() - t0;
+  assert.ok(elapsed < 400 + 60, `elapsed ${elapsed}ms exceeds the budget by more than the close bound`);
+  assert.ok(sum.budget_exhausted); assert.ok(sum.stored + sum.db_errors < 6, "not every item was attempted");
+  assert.ok(db.allClosed);
+  // no budget left for listing at all → nothing is listed and nothing is ingested
+  let t = 1_700_000_000_000; const none = await runPoll({ ...deps(new FakeConnector(() => { throw new Error("no"); }), vautoWith([appr("1", 1)]), [], () => (t += 1_000)), cfg: { ...cfg, timeouts: { ...cfg.timeouts, pollBudgetMs: 1500, dbCallTimeoutMs: 1000 } } });
+  assert.equal(none.listed, 0); assert.equal(none.list_error, "VAUTO_TIMEOUT:no_budget_for_listing");
+});
 test("expire: the count is returned; a failure is reported, never thrown", async () => {
   const r = await runExpire(new FakeConnector(() => [{ r: 2 }]), cfg, () => undefined);
   assert.deepEqual(r, { ok: true, expired: 2 });
