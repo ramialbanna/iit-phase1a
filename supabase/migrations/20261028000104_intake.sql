@@ -6,7 +6,6 @@
 -- Depends on 001–003. EXCLUDED and named: reschedule linking (§5.4) — needs 3.1 read-backs, whose allowlist is empty until the
 -- field map exists (001 D-8), so no function is provided; §5.10 polling (the Worker's discovery loop calls ingest per
 -- observation); §5.11 lienholder sync; §6 gate; §5.8 bridge; data_entry_due_at (D-6, calendar empty).
-BEGIN;
 SET ROLE iit_owner;
 SET search_path = pg_catalog;
 
@@ -723,4 +722,3 @@ DO $$ DECLARE r record; BEGIN
     EXECUTE pg_catalog.format('ALTER TABLE iit.%I ENABLE ROW LEVEL SECURITY', r.relname);
   END LOOP; END $$;
 RESET ROLE;
-COMMIT;
