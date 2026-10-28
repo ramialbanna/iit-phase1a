@@ -4,7 +4,6 @@
 -- no sequences. PostgREST assumes this role from the JWT `role` claim of the server-side credential Base44 holds; for that,
 -- `authenticator` (Supabase's PostgREST login role) must be a member of iit_base44 — granted here when that role exists.
 -- NOT a credential, NOT schema exposure (those are Supabase configuration steps — docs/d2-deployment-package.md), NOT applied.
-BEGIN;
 
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'iit_base44') THEN CREATE ROLE iit_base44 NOLOGIN NOINHERIT; END IF;
@@ -78,4 +77,3 @@ BEGIN
 END $$;
 REVOKE ALL ON FUNCTION iit.require_role(text,text) FROM PUBLIC;
 RESET ROLE;
-COMMIT;

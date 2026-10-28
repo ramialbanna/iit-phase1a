@@ -4,7 +4,6 @@
 -- Depends on 001 and 002. EXCLUDED: §5.8 bridge — release_deal does NOT queue add_31_row (dependency stated inline);
 -- vAuto intake, draft-1 creation/editing, seller-party edits, reschedule linking, restart decisions (004, intake/parties
 -- slice); §6 gate and the §6.4 sweep (open_hold still states that gap); parser re-run check (no parser objects exist — D-19).
-BEGIN;
 SET ROLE iit_owner;
 SET search_path = pg_catalog;
 
@@ -512,4 +511,3 @@ DO $$ DECLARE r record; BEGIN
     EXECUTE pg_catalog.format('ALTER TABLE iit.%I ENABLE ROW LEVEL SECURITY', r.relname);
   END LOOP; END $$;
 RESET ROLE;
-COMMIT;

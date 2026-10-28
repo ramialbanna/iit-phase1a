@@ -1,0 +1,215 @@
+# s2test catalog-only BEFORE baseline — 2026-10-28
+# Project: fqxfrtfiysbuctcccudb (TAV Interim Inventory Tool). Captured in the Phase B read-only preflight
+# (docs/preflight/phase-b-remote-preflight-2026-10-28.md) inside BEGIN TRANSACTION READ ONLY ... ROLLBACK,
+# transaction_read_only = on, PostgreSQL 17.11, as role postgres via the session pooler.
+# Source: section 6 (lines 71-272) of the original psql output, sha256 of the full output
+#   36b798e473cd5e66ce9542f36bcc3428b5ddea69d02f9cc7d26e8a25444a56da; sha256 of the verbatim lines 71-272
+#   c64fabd8f08b9b35688ea2ec6b2390e33bddb343f731dfbba9b174158950a9be. The only change below is that trailing
+#   psql column padding is stripped from each line (git whitespace check); no value, row, or ordering changed.
+# Catalog and statistics metadata only: no s2test application row was selected, no count(*) was run on an s2test
+# relation, and no s2test function or trigger was invoked. est_rows_reltuples = pg_class.reltuples (-1 = never
+# analyzed); est_rows_stats = pg_stat_all_tables.n_live_tup. Neither is an exact count.
+# Purpose: compare after IIT application; every line below should be unchanged by migrations 20261028000101-106.
+
+=== 6. S2TEST CATALOG-ONLY BASELINE ===
+ nspname |    owner     |                           nspacl
+---------+--------------+-------------------------------------------------------------
+ s2test  | s2test_owner | {s2test_owner=UC/s2test_owner,s2test_runner=U/s2test_owner}
+(1 row)
+
+-- relation counts by kind
+ relkind | count
+---------+-------
+ S       |     6
+ i       |    25
+ r       |    18
+(3 rows)
+
+-- relations: owner, acl, RLS, est rows, size
+          relname           | relkind |    owner     |                               relacl                               | rls | force_rls | est_rows_reltuples | est_rows_stats | total_bytes
+----------------------------+---------+--------------+--------------------------------------------------------------------+-----+-----------+--------------------+----------------+-------------
+ audit_hold_events_id_seq   | S       | s2test_owner |                                                                    | f   | f         |                  1 |                |        8192
+ denial_audit_id_seq        | S       | s2test_owner |                                                                    | f   | f         |                  1 |                |        8192
+ fake_effects_id_seq        | S       | s2test_owner |                                                                    | f   | f         |                  1 |                |        8192
+ gate_display_rows_id_seq   | S       | s2test_owner |                                                                    | f   | f         |                  1 |                |        8192
+ gated_action_events_id_seq | S       | s2test_owner |                                                                    | f   | f         |                  1 |                |        8192
+ outbound_log_id_seq        | S       | s2test_owner |                                                                    | f   | f         |                  1 |                |        8192
+ audit_decisions            | r       | s2test_owner | {s2test_owner=arwdDxtm/s2test_owner,s2test_runner=r/s2test_owner}  | f   | f         |                 -1 |             24 |       32768
+ audit_hold_events          | r       | s2test_owner | {s2test_owner=arwdDxtm/s2test_owner,s2test_runner=r/s2test_owner}  | f   | f         |                 -1 |              0 |       16384
+ audit_holds                | r       | s2test_owner | {s2test_owner=arwdDxtm/s2test_owner,s2test_runner=r/s2test_owner}  | f   | f         |                 -1 |              0 |       16384
+ authorization_requests     | r       | s2test_owner | {s2test_owner=arwdDxtm/s2test_owner,s2test_runner=r/s2test_owner}  | f   | f         |                120 |            138 |      139264
+ config                     | r       | s2test_owner | {s2test_owner=arwdDxtm/s2test_owner,s2test_runner=r/s2test_owner}  | f   | f         |                 -1 |              5 |       32768
+ deal_versions              | r       | s2test_owner | {s2test_owner=arwdDxtm/s2test_owner,s2test_runner=r/s2test_owner}  | f   | f         |                 -1 |             24 |       32768
+ deals                      | r       | s2test_owner | {s2test_owner=arwdDxtm/s2test_owner,s2test_runner=r/s2test_owner}  | f   | f         |                 -1 |             24 |       32768
+ denial_audit               | r       | s2test_owner | {s2test_owner=arwdDxtm/s2test_owner,s2test_runner=r/s2test_owner}  | f   | f         |                 -1 |              9 |       32768
+ fake_effects               | r       | s2test_owner | {s2test_owner=arwdDxtm/s2test_owner,s2test_runner=r/s2test_owner}  | f   | f         |                 -1 |              0 |       16384
+ gate_display_rows          | r       | s2test_owner | {s2test_owner=arwdDxtm/s2test_owner,s2test_runner=r/s2test_owner}  | f   | f         |                 -1 |              0 |       32768
+ gated_action_attempts      | r       | s2test_owner | {s2test_owner=arwdDxtm/s2test_owner,s2test_runner=r/s2test_owner}  | f   | f         |                120 |            130 |      147456
+ gated_action_events        | r       | s2test_owner | {s2test_owner=arwdDxtm/s2test_owner,s2test_runner=r/s2test_owner}  | f   | f         |                120 |            151 |      114688
+ gated_actions              | r       | s2test_owner | {s2test_owner=arwdDxtm/s2test_owner,s2test_runner=r/s2test_owner}  | f   | f         |                120 |            138 |      188416
+ hold_sweep_snapshot        | r       | s2test_owner | {s2test_owner=arwdDxtm/s2test_owner,s2test_runner=r/s2test_owner}  | f   | f         |                 -1 |              0 |       16384
+ identity_probes            | r       | s2test_owner | {s2test_owner=arwdDxtm/s2test_owner,s2test_runner=ar/s2test_owner} | f   | f         |                400 |            426 |      188416
+ outbound_log               | r       | s2test_owner | {s2test_owner=arwdDxtm/s2test_owner,s2test_runner=r/s2test_owner}  | f   | f         |                 -1 |             24 |       32768
+ source_records             | r       | s2test_owner | {s2test_owner=arwdDxtm/s2test_owner,s2test_runner=r/s2test_owner}  | f   | f         |                 -1 |             24 |       32768
+ work_items                 | r       | s2test_owner | {s2test_owner=arwdDxtm/s2test_owner,s2test_runner=r/s2test_owner}  | f   | f         |                 -1 |              7 |       49152
+(24 rows)
+
+-- table columns (catalog)
+        relname         |                                                                                                                                                                                                             columns
+------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ audit_decisions        | id uuid, deal_id uuid, version_no integer, decision text, at timestamp with time zone
+ audit_hold_events      | id bigint, hold_id uuid, event text, reason text, by text, at timestamp with time zone
+ audit_holds            | id uuid, deal_id uuid, cause text, opened_at timestamp with time zone, opened_by text
+ authorization_requests | request_id uuid, action_key text, iid text, action text, triggered_by_text text, caller_integration text, caller_run_ref text, caller_row_status text, result text, reason text, attempt_id uuid, xid xid8, backend_pid integer, backend_start timestamp with time zone, read_status text, read_at timestamp with time zone, read_latency_ms integer, read_error text, lock_wait_ms numeric, created_at timestamp with time zone
+ config                 | key text, value jsonb
+ deal_versions          | deal_id uuid, version_no integer, status text, is_material_draft boolean, created_at timestamp with time zone
+ deals                  | id uuid, route text, route_confirmed boolean, cancelled_at timestamp with time zone, voided_at timestamp with time zone, created_at timestamp with time zone
+ denial_audit           | id bigint, request_id uuid, reason_code text, integration text, route text, detail jsonb, at timestamp with time zone
+ fake_effects           | id bigint, integration text, action_key text, attempt_id uuid, request jsonb, at timestamp with time zone
+ gate_display_rows      | id bigint, iid text, seq bigint, kind text, expires_at timestamp with time zone, pushed_at timestamp with time zone
+ gated_action_attempts  | id uuid, action_id uuid, attempt_no integer, caller_integration text, caller_run_ref text, request_id uuid, xid xid8, granted_at timestamp with time zone, state text
+ gated_action_events    | id bigint, action_id uuid, attempt_id uuid, request_id uuid, event text, detail jsonb, at timestamp with time zone
+ gated_actions          | id uuid, action_key text, iid text, deal_id uuid, action text, caller_integration text, triggered_by_text text, state text, current_attempt_id uuid, authorized_at timestamp with time zone, deal_version integer, outcome_reported_at timestamp with time zone, outcome_evidence jsonb, completed_after_hold boolean
+ hold_sweep_snapshot    | hold_id uuid, attempt_id uuid, action_id uuid, state_at_snapshot text, action_state_at_snapshot text
+ identity_probes        | request_id uuid, xid xid8, backend_pid integer, backend_start timestamp with time zone, label text, created_at timestamp with time zone
+ outbound_log           | id bigint, request_id uuid, kind text, host text, target_id text, at timestamp with time zone
+ source_records         | iid text, deal_id uuid, link_status text, link_confirmed boolean, canonical boolean, status text
+ work_items             | id uuid, kind text, deal_id uuid, action_id uuid, attempt_id uuid, hold_id uuid, created_at timestamp with time zone
+(18 rows)
+
+-- indexes
+       tablename        |                   indexname                    |                                                                           indexdef
+------------------------+------------------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------
+ audit_decisions        | audit_decisions_pkey                           | CREATE UNIQUE INDEX audit_decisions_pkey ON s2test.audit_decisions USING btree (id)
+ audit_hold_events      | audit_hold_events_pkey                         | CREATE UNIQUE INDEX audit_hold_events_pkey ON s2test.audit_hold_events USING btree (id)
+ audit_holds            | audit_holds_pkey                               | CREATE UNIQUE INDEX audit_holds_pkey ON s2test.audit_holds USING btree (id)
+ authorization_requests | authorization_requests_pkey                    | CREATE UNIQUE INDEX authorization_requests_pkey ON s2test.authorization_requests USING btree (request_id)
+ config                 | config_pkey                                    | CREATE UNIQUE INDEX config_pkey ON s2test.config USING btree (key)
+ deal_versions          | deal_versions_pkey                             | CREATE UNIQUE INDEX deal_versions_pkey ON s2test.deal_versions USING btree (deal_id, version_no)
+ deals                  | deals_pkey                                     | CREATE UNIQUE INDEX deals_pkey ON s2test.deals USING btree (id)
+ denial_audit           | denial_audit_pkey                              | CREATE UNIQUE INDEX denial_audit_pkey ON s2test.denial_audit USING btree (id)
+ fake_effects           | fake_effects_pkey                              | CREATE UNIQUE INDEX fake_effects_pkey ON s2test.fake_effects USING btree (id)
+ gate_display_rows      | gate_display_rows_pkey                         | CREATE UNIQUE INDEX gate_display_rows_pkey ON s2test.gate_display_rows USING btree (id)
+ gated_action_attempts  | gated_action_attempts_action_id_attempt_no_key | CREATE UNIQUE INDEX gated_action_attempts_action_id_attempt_no_key ON s2test.gated_action_attempts USING btree (action_id, attempt_no)
+ gated_action_attempts  | gated_action_attempts_one_granted              | CREATE UNIQUE INDEX gated_action_attempts_one_granted ON s2test.gated_action_attempts USING btree (action_id) WHERE (state = 'granted'::text)
+ gated_action_attempts  | gated_action_attempts_pkey                     | CREATE UNIQUE INDEX gated_action_attempts_pkey ON s2test.gated_action_attempts USING btree (id)
+ gated_action_attempts  | gated_action_attempts_request_id_key           | CREATE UNIQUE INDEX gated_action_attempts_request_id_key ON s2test.gated_action_attempts USING btree (request_id)
+ gated_action_events    | gated_action_events_one_response_lost          | CREATE UNIQUE INDEX gated_action_events_one_response_lost ON s2test.gated_action_events USING btree (attempt_id) WHERE (event = 'grant_response_lost'::text)
+ gated_action_events    | gated_action_events_one_withheld               | CREATE UNIQUE INDEX gated_action_events_one_withheld ON s2test.gated_action_events USING btree (attempt_id) WHERE (event = 'grant_withheld_late'::text)
+ gated_action_events    | gated_action_events_pkey                       | CREATE UNIQUE INDEX gated_action_events_pkey ON s2test.gated_action_events USING btree (id)
+ gated_actions          | gated_actions_action_key_key                   | CREATE UNIQUE INDEX gated_actions_action_key_key ON s2test.gated_actions USING btree (action_key)
+ gated_actions          | gated_actions_pkey                             | CREATE UNIQUE INDEX gated_actions_pkey ON s2test.gated_actions USING btree (id)
+ hold_sweep_snapshot    | hold_sweep_snapshot_pkey                       | CREATE UNIQUE INDEX hold_sweep_snapshot_pkey ON s2test.hold_sweep_snapshot USING btree (hold_id, attempt_id)
+ identity_probes        | identity_probes_pkey                           | CREATE UNIQUE INDEX identity_probes_pkey ON s2test.identity_probes USING btree (request_id)
+ outbound_log           | outbound_log_pkey                              | CREATE UNIQUE INDEX outbound_log_pkey ON s2test.outbound_log USING btree (id)
+ source_records         | source_records_pkey                            | CREATE UNIQUE INDEX source_records_pkey ON s2test.source_records USING btree (iid)
+ work_items             | work_items_once                                | CREATE UNIQUE INDEX work_items_once ON s2test.work_items USING btree (kind, attempt_id, COALESCE(hold_id, '00000000-0000-0000-0000-000000000000'::uuid))
+ work_items             | work_items_pkey                                | CREATE UNIQUE INDEX work_items_pkey ON s2test.work_items USING btree (id)
+(25 rows)
+
+-- constraints
+              tbl              |                    conname                     | contype
+-------------------------------+------------------------------------------------+---------
+ s2test.deals                  | deals_pkey                                     | p
+ s2test.deals                  | deals_route_check                              | c
+ s2test.deal_versions          | deal_versions_deal_id_fkey                     | f
+ s2test.deal_versions          | deal_versions_pkey                             | p
+ s2test.deal_versions          | deal_versions_status_check                     | c
+ s2test.audit_decisions        | audit_decisions_deal_id_fkey                   | f
+ s2test.audit_decisions        | audit_decisions_decision_check                 | c
+ s2test.audit_decisions        | audit_decisions_pkey                           | p
+ s2test.source_records         | source_records_deal_id_fkey                    | f
+ s2test.source_records         | source_records_link_status_check               | c
+ s2test.source_records         | source_records_pkey                            | p
+ s2test.source_records         | source_records_status_check                    | c
+ s2test.audit_holds            | audit_holds_cause_check                        | c
+ s2test.audit_holds            | audit_holds_deal_id_fkey                       | f
+ s2test.audit_holds            | audit_holds_pkey                               | p
+ s2test.audit_hold_events      | audit_hold_events_event_check                  | c
+ s2test.audit_hold_events      | audit_hold_events_hold_id_fkey                 | f
+ s2test.audit_hold_events      | audit_hold_events_pkey                         | p
+ s2test.config                 | config_pkey                                    | p
+ s2test.gated_actions          | gated_actions_action_key_key                   | u
+ s2test.gated_actions          | gated_actions_deal_id_fkey                     | f
+ s2test.gated_actions          | gated_actions_pkey                             | p
+ s2test.gated_actions          | gated_actions_state_check                      | c
+ s2test.gated_action_attempts  | gated_action_attempts_action_id_attempt_no_key | u
+ s2test.gated_action_attempts  | gated_action_attempts_action_id_fkey           | f
+ s2test.gated_action_attempts  | gated_action_attempts_pkey                     | p
+ s2test.gated_action_attempts  | gated_action_attempts_request_id_key           | u
+ s2test.gated_action_attempts  | gated_action_attempts_state_check              | c
+ s2test.gated_action_events    | gated_action_events_action_id_fkey             | f
+ s2test.gated_action_events    | gated_action_events_attempt_id_fkey            | f
+ s2test.gated_action_events    | gated_action_events_pkey                       | p
+ s2test.authorization_requests | authorization_requests_attempt_id_fkey         | f
+ s2test.authorization_requests | authorization_requests_pkey                    | p
+ s2test.authorization_requests | authorization_requests_result_check            | c
+ s2test.work_items             | work_items_action_id_fkey                      | f
+ s2test.work_items             | work_items_attempt_id_fkey                     | f
+ s2test.work_items             | work_items_deal_id_fkey                        | f
+ s2test.work_items             | work_items_hold_id_fkey                        | f
+ s2test.work_items             | work_items_kind_check                          | c
+ s2test.work_items             | work_items_pkey                                | p
+ s2test.hold_sweep_snapshot    | hold_sweep_snapshot_action_id_fkey             | f
+ s2test.hold_sweep_snapshot    | hold_sweep_snapshot_attempt_id_fkey            | f
+ s2test.hold_sweep_snapshot    | hold_sweep_snapshot_hold_id_fkey               | f
+ s2test.hold_sweep_snapshot    | hold_sweep_snapshot_pkey                       | p
+ s2test.denial_audit           | denial_audit_pkey                              | p
+ s2test.gate_display_rows      | gate_display_rows_kind_check                   | c
+ s2test.gate_display_rows      | gate_display_rows_pkey                         | p
+ s2test.fake_effects           | fake_effects_pkey                              | p
+ s2test.outbound_log           | outbound_log_pkey                              | p
+ s2test.identity_probes        | identity_probes_label_check                    | c
+ s2test.identity_probes        | identity_probes_pkey                           | p
+(51 rows)
+
+-- functions/procedures
+         proname          |                                                                                                              args                                                                                                               | prokind | prosecdef |    owner     |                           proacl
+--------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------+-----------+--------------+------------------------------------------------------------
+ authorize_commit         | p_request_id uuid, p_read_status text, p_read_at timestamp with time zone, p_read_latency_ms integer, p_read_error text                                                                                                         | f       | t         | s2test_owner | {s2test_owner=X/s2test_owner,s2test_runner=X/s2test_owner}
+ authorize_prepare        | p_request_id uuid, p_action_key text, p_iid text, p_action text, p_integration text, p_run_ref text, p_caller_row_status text, p_triggered_by text, p_xid xid8, p_backend_pid integer, p_backend_start timestamp with time zone | f       | t         | s2test_owner | {s2test_owner=X/s2test_owner,s2test_runner=X/s2test_owner}
+ begin_identity           |                                                                                                                                                                                                                                 | f       | f         | s2test_owner | {s2test_owner=X/s2test_owner,s2test_runner=X/s2test_owner}
+ deal_lock_key            | p_deal uuid                                                                                                                                                                                                                     | f       | f         | s2test_owner | {s2test_owner=X/s2test_owner,s2test_runner=X/s2test_owner}
+ expire_unreported        |                                                                                                                                                                                                                                 | f       | t         | s2test_owner | {s2test_owner=X/s2test_owner,s2test_runner=X/s2test_owner}
+ fair_deal_lock           |                                                                                                                                                                                                                                 | f       | t         | s2test_owner | {s2test_owner=X/s2test_owner}
+ fake_effect              | p_integration text, p_action_key text, p_attempt_id uuid, p_request jsonb                                                                                                                                                       | f       | t         | s2test_owner | {s2test_owner=X/s2test_owner,s2test_runner=X/s2test_owner}
+ forbid_mutation          |                                                                                                                                                                                                                                 | f       | f         | s2test_owner | {s2test_owner=X/s2test_owner}
+ identity_probe_record    | p_request_id uuid, p_xid xid8, p_pid integer, p_backend_start timestamp with time zone                                                                                                                                          | f       | f         | s2test_owner | {s2test_owner=X/s2test_owner,s2test_runner=X/s2test_owner}
+ open_hold                | p_deal_id uuid, p_cause text, p_by text                                                                                                                                                                                         | f       | t         | s2test_owner | {s2test_owner=X/s2test_owner,s2test_runner=X/s2test_owner}
+ push_display_row         | p_iid text, p_kind text, p_seq bigint, p_ttl_seconds integer                                                                                                                                                                    | f       | t         | s2test_owner | {s2test_owner=X/s2test_owner,s2test_runner=X/s2test_owner}
+ reconcile_request        | p_request_id uuid, p_xid xid8, p_expected_db text, p_expected_tag text                                                                                                                                                          | f       | t         | s2test_owner | {s2test_owner=X/s2test_owner,s2test_runner=X/s2test_owner}
+ record_grant_withheld    | p_attempt_id uuid, p_request_id uuid                                                                                                                                                                                            | f       | t         | s2test_owner | {s2test_owner=X/s2test_owner,s2test_runner=X/s2test_owner}
+ record_outbound          | p_request_id uuid, p_kind text, p_host text, p_target text                                                                                                                                                                      | f       | t         | s2test_owner | {s2test_owner=X/s2test_owner,s2test_runner=X/s2test_owner}
+ record_route_denial      | p_request_id uuid, p_reason text, p_integration text, p_route text, p_detail jsonb                                                                                                                                              | f       | t         | s2test_owner | {s2test_owner=X/s2test_owner,s2test_runner=X/s2test_owner}
+ record_txn_denial        | p_request_id uuid, p_reason text, p_integration text, p_detail jsonb                                                                                                                                                            | f       | t         | s2test_owner | {s2test_owner=X/s2test_owner,s2test_runner=X/s2test_owner}
+ release_hold             | p_hold_id uuid, p_reason text, p_by text                                                                                                                                                                                        | f       | t         | s2test_owner | {s2test_owner=X/s2test_owner,s2test_runner=X/s2test_owner}
+ report_action_outcome    | p_attempt_id uuid, p_integration text, p_outcome text, p_evidence jsonb                                                                                                                                                         | f       | t         | s2test_owner | {s2test_owner=X/s2test_owner,s2test_runner=X/s2test_owner}
+ row_actionable           | p_iid text, p_read_status text, p_check_status boolean                                                                                                                                                                          | f       | t         | s2test_owner | {s2test_owner=X/s2test_owner,s2test_runner=X/s2test_owner}
+ test_expire_attempts     | p_ids uuid[]                                                                                                                                                                                                                    | f       | t         | s2test_owner | {s2test_owner=X/s2test_owner}
+ test_seed_attempt        | p_deal uuid, p_iid text, p_integration text, p_action_key text                                                                                                                                                                  | f       | t         | s2test_owner | {s2test_owner=X/s2test_owner,s2test_runner=X/s2test_owner}
+ test_seed_deal           | p_deal uuid, p_iid text, p_route text, p_approved boolean                                                                                                                                                                       | f       | t         | s2test_owner | {s2test_owner=X/s2test_owner,s2test_runner=X/s2test_owner}
+ test_set_active_statuses | p_statuses jsonb                                                                                                                                                                                                                | f       | t         | s2test_owner | {s2test_owner=X/s2test_owner}
+ test_set_outcome_timeout | p_seconds integer                                                                                                                                                                                                               | f       | t         | s2test_owner | {s2test_owner=X/s2test_owner,s2test_runner=X/s2test_owner}
+(24 rows)
+
+-- triggers
+            tbl             |             tgname              | tgenabled
+----------------------------+---------------------------------+-----------
+ s2test.audit_hold_events   | audit_hold_events_append_only   | O
+ s2test.gated_action_events | gated_action_events_append_only | O
+ s2test.hold_sweep_snapshot | hold_sweep_snapshot_append_only | O
+ s2test.denial_audit        | denial_audit_append_only        | O
+ s2test.fake_effects        | fake_effects_append_only        | O
+ s2test.outbound_log        | outbound_log_append_only        | O
+ s2test.identity_probes     | identity_probes_append_only     | O
+(7 rows)
+
+-- policies
+ tablename | policyname | cmd | roles
+-----------+------------+-----+-------
+(0 rows)
+
+-- custom types
+ typname | typtype
+---------+---------
+(0 rows)

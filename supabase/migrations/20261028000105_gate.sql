@@ -6,7 +6,6 @@
 -- `Audit Gate` display table push) — the Worker passes the verified caller_integration and the 3.1 read result into these
 -- functions; same-run replay (§6.2: disabled until an enforceable single-execution mechanism is proven — nothing here
 -- enables it); the proven-idempotent target list (seeded EMPTY, D-36); §5.8 bridge; polling; lienholder sync.
-BEGIN;
 SET ROLE iit_owner;
 SET search_path = pg_catalog;
 
@@ -476,4 +475,3 @@ DO $$ DECLARE r record; BEGIN
     EXECUTE pg_catalog.format('ALTER TABLE iit.%I ENABLE ROW LEVEL SECURITY', r.relname);
   END LOOP; END $$;
 RESET ROLE;
-COMMIT;

@@ -8,7 +8,6 @@
 -- Roles: this file CREATEs the NOLOGIN roles it needs if absent (iit_owner, iit_integration, tav_worker). The real Base44
 -- integration role is granted membership of iit_integration once identified (P1) — docs/migrations/001.md D-2.
 
-BEGIN;
 
 -- ---------------------------------------------------------------------------------------------------------------------
 -- 0. roles and schema
@@ -724,4 +723,3 @@ DO $$ DECLARE r record; BEGIN
   END LOOP; END $$;
 
 RESET ROLE;
-COMMIT;

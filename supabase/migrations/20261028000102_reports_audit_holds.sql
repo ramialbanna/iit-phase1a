@@ -2,7 +2,6 @@
 -- Depends on 001. EXCLUDED: release_deal / corrections / cancel (003, workflow); §6 gate incl. the §6.4 unfinished-action
 -- sweep (open_hold states the dependency and does NOT stub it); §5.8 bridge (owner decision); storage bucket creation
 -- (Supabase Storage is configured at application time — docs/migrations/002.md D-14).
-BEGIN;
 SET ROLE iit_owner;
 SET search_path = pg_catalog;
 
@@ -504,4 +503,3 @@ DO $$ DECLARE r record; BEGIN
     EXECUTE pg_catalog.format('ALTER TABLE iit.%I ENABLE ROW LEVEL SECURITY', r.relname);
   END LOOP; END $$;
 RESET ROLE;
-COMMIT;
