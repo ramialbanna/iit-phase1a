@@ -32,4 +32,43 @@ REVOKE ALL ON ALL TABLES IN SCHEMA iit FROM iit_base44;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA iit FROM iit_base44;
 -- default privileges for objects iit_owner creates later: nothing to iit_base44 (grants are always explicit, per function)
 ALTER DEFAULT PRIVILEGES FOR ROLE iit_owner IN SCHEMA iit REVOKE ALL ON FUNCTIONS FROM PUBLIC;
+
+-- ---------------------------------------------------------------------------------------------------------------------
+-- Genuine per-credential revocation (Codex D-2 package P1). A JWT cannot be withdrawn before `exp`, and revoking the role's
+-- membership then re-granting it would re-enable a compromised token. So every iit_base44 token must carry a `jti`, and
+-- require_role() refuses any jti listed here — independent of the role, immediately, and permanently. The owner revokes by
+-- inserting the jti (SQL editor, as postgres); no RPC can revoke or un-revoke. Rows are never deleted (history-covered).
+-- ---------------------------------------------------------------------------------------------------------------------
+SET ROLE iit_owner;
+CREATE TABLE iit.revoked_credentials (
+  jti text PRIMARY KEY,
+  revoked_at timestamptz NOT NULL DEFAULT now(),
+  reason text NOT NULL
+);
+SELECT iit.attach_history('iit.revoked_credentials', 'jti');        -- no DELETE (reject_delete)
+CREATE OR REPLACE FUNCTION iit.require_role(p_actor_base44_user_id text, p_required_role text) RETURNS uuid
+LANGUAGE plpgsql SECURITY DEFINER STABLE SET search_path = '' AS $$
+DECLARE v_user uuid; v_claims text; v_role text; v_jti text;
+BEGIN
+  -- PostgREST path: the request's JWT claims are visible; a token for the Base44 role must carry an unrevoked jti (006)
+  v_claims := pg_catalog.current_setting('request.jwt.claims', true);
+  IF v_claims IS NOT NULL AND v_claims <> '' THEN
+    v_role := v_claims::jsonb ->> 'role'; v_jti := v_claims::jsonb ->> 'jti';
+    IF v_role = 'iit_base44' THEN
+      IF v_jti IS NULL OR v_jti = '' THEN RAISE EXCEPTION 'CREDENTIAL_NO_JTI' USING ERRCODE = '28000'; END IF;
+      IF EXISTS (SELECT 1 FROM iit.revoked_credentials r WHERE r.jti = v_jti) THEN RAISE EXCEPTION 'CREDENTIAL_REVOKED' USING ERRCODE = '28000'; END IF;
+    END IF;
+  END IF;
+  IF p_actor_base44_user_id IS NULL OR p_actor_base44_user_id = '' THEN RAISE EXCEPTION 'ACTOR_REQUIRED' USING ERRCODE = '28000'; END IF;
+  SELECT si.user_id INTO v_user
+    FROM iit.staff_identities si JOIN iit.users u ON u.id = si.user_id
+   WHERE si.base44_user_id = p_actor_base44_user_id AND si.active AND u.active;
+  IF v_user IS NULL THEN RAISE EXCEPTION 'ACTOR_UNKNOWN_OR_INACTIVE' USING ERRCODE = '28000'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM iit.user_roles ur WHERE ur.user_id = v_user AND ur.role = p_required_role) THEN
+    RAISE EXCEPTION 'ROLE_MISSING: %', p_required_role USING ERRCODE = '42501';
+  END IF;
+  RETURN v_user;
+END $$;
+REVOKE ALL ON FUNCTION iit.require_role(text,text) FROM PUBLIC;
+RESET ROLE;
 COMMIT;

@@ -8,8 +8,22 @@ DO $$ DECLARE n int; BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='iit_base44' AND NOT rolcanlogin AND NOT rolsuper AND NOT rolbypassrls AND NOT rolcreaterole AND NOT rolcreatedb) THEN RAISE EXCEPTION 'Z1a role attributes'; END IF;
   IF NOT pg_has_role('authenticator', 'iit_base44', 'MEMBER') THEN RAISE EXCEPTION 'Z1b authenticator cannot assume iit_base44'; END IF;
   IF NOT has_schema_privilege('iit_base44', 'iit', 'USAGE') THEN RAISE EXCEPTION 'Z1c no schema usage'; END IF;
+  -- P2: the EXACT allowlist, not a count — every executable function is one of the 27 named signatures and all 27 are present
   SELECT count(*) INTO n FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace WHERE s.nspname='iit' AND has_function_privilege('iit_base44', p.oid, 'EXECUTE');
   IF n <> 27 THEN RAISE EXCEPTION 'Z1d manifest size: % executable functions, expected 27', n; END IF;
+  IF (SELECT string_agg(p.oid::regprocedure::text, E'\n' ORDER BY p.oid::regprocedure::text) FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace WHERE s.nspname='iit' AND has_function_privilege('iit_base44', p.oid, 'EXECUTE'))
+     <> (SELECT string_agg(x, E'\n' ORDER BY x) FROM unnest(ARRAY[
+      'iit.amend_field(uuid,text,jsonb,text,text)', 'iit.amend_party(uuid,uuid,jsonb,text,text)', 'iit.authorize_report_access(uuid,text)',
+      'iit.begin_report_upload(uuid,text,text,uuid,uuid,text,timestamp with time zone,uuid,text)', 'iit.cancel_deal(uuid,text,text)',
+      'iit.correct_field(uuid,text,jsonb,text,text)', 'iit.correct_party(uuid,text,integer,jsonb,text,text)', 'iit.create_manual_deal(text,text,text,text)',
+      'iit.deactivate_staff(text,text)', 'iit.finish_report_upload(uuid,bigint,text,text)', 'iit.rebind_hold(uuid,text,text)',
+      'iit.record_decision(uuid,text,text,text)', 'iit.release_deal(uuid,text)', 'iit.request_reaudit(uuid,text,text)',
+      'iit.resolve_flag(uuid,text,text,text)', 'iit.resolve_restart(uuid,text,text,text)', 'iit.resolve_unknown_outcome(uuid,text,jsonb,text,text)',
+      'iit.resolve_work_item(uuid,text,text)', 'iit.revoke_waiver(uuid,text,text)', 'iit.set_consignment(uuid,uuid,numeric,text,text)',
+      'iit.set_deal_fact(uuid,text,jsonb,text)', 'iit.set_seller_party(uuid,text,integer,jsonb,text)', 'iit.set_source_channel(uuid,text,text)',
+      'iit.set_staff_identity(text,text,text,text)', 'iit.set_staff_role(uuid,text,boolean,text)', 'iit.validate_report(uuid,text,text,jsonb,text,text)',
+      'iit.waive_report(uuid,text,text,text)']) x)
+  THEN RAISE EXCEPTION 'Z1d2 manifest differs from the 27 named signatures'; END IF;
   -- no table or sequence privilege of any kind
   IF EXISTS (SELECT 1 FROM (SELECT c.oid FROM pg_class c JOIN pg_namespace s ON s.oid = c.relnamespace WHERE s.nspname='iit' AND c.relkind='r' OFFSET 0) c WHERE (has_table_privilege('iit_base44', c.oid, 'SELECT') OR has_table_privilege('iit_base44', c.oid, 'INSERT') OR has_table_privilege('iit_base44', c.oid, 'UPDATE') OR has_table_privilege('iit_base44', c.oid, 'DELETE'))) THEN RAISE EXCEPTION 'Z1e table privilege'; END IF;
   IF EXISTS (SELECT 1 FROM (SELECT c.oid FROM pg_class c JOIN pg_namespace s ON s.oid = c.relnamespace WHERE s.nspname='iit' AND c.relkind='S' OFFSET 0) q WHERE has_sequence_privilege('iit_base44', q.oid, 'USAGE')) THEN RAISE EXCEPTION 'Z1f sequence privilege'; END IF;
@@ -17,7 +31,7 @@ END $$;
 
 -- Z2 as PostgREST would run it: an approved RPC succeeds and the actor/role checks inside still apply
 SET ROLE iit_base44;
-SELECT set_config('request.jwt.claims', '{"role":"iit_base44","iss":"supabase"}', true);
+SELECT set_config('request.jwt.claims', '{"role":"iit_base44","iss":"supabase","jti":"tok-1"}', true);
 DO $$ DECLARE d uuid; BEGIN
   d := iit.create_manual_deal('manual_exception', 'WAUZZZ8V7JA000600', 'Brown Fig – Manheim', 'b44-de');     -- approved, data_entry actor
   IF d IS NULL THEN RAISE EXCEPTION 'Z2a'; END IF;
@@ -78,6 +92,28 @@ DO $$ BEGIN
   BEGIN PERFORM 1 FROM iit.deals; RAISE EXCEPTION 'Z6f table read from the authenticator session'; EXCEPTION WHEN SQLSTATE '42501' THEN NULL; END;
 END $$;
 \c iit_local postgres
+-- Z8 genuine credential revocation (P1): a token without jti is refused; a revoked jti is refused immediately and stays refused;
+-- another token (new jti) keeps working; no RPC can un-revoke (table has no DELETE, no grants to iit_base44)
+INSERT INTO iit.revoked_credentials(jti, reason) VALUES ('tok-1', 'laptop stolen 2026-10-28');
+\c iit_local authenticator
+SET ROLE iit_base44;
+DO $$ BEGIN
+  PERFORM set_config('request.jwt.claims', '{"role":"iit_base44","iss":"supabase","jti":"tok-1"}', true);
+  BEGIN PERFORM iit.create_manual_deal('manual_exception', 'WAUZZZ8V7JA000620', 'Brown Fig – ACV', 'b44-de'); RAISE EXCEPTION 'Z8a revoked token accepted'; EXCEPTION WHEN SQLSTATE '28000' THEN IF SQLERRM NOT LIKE 'CREDENTIAL_REVOKED%' THEN RAISE; END IF; END;
+  PERFORM set_config('request.jwt.claims', '{"role":"iit_base44","iss":"supabase"}', true);
+  BEGIN PERFORM iit.create_manual_deal('manual_exception', 'WAUZZZ8V7JA000621', 'Brown Fig – ACV', 'b44-de'); RAISE EXCEPTION 'Z8b token without jti accepted'; EXCEPTION WHEN SQLSTATE '28000' THEN IF SQLERRM NOT LIKE 'CREDENTIAL_NO_JTI%' THEN RAISE; END IF; END;
+  PERFORM set_config('request.jwt.claims', '{"role":"iit_base44","iss":"supabase","jti":"tok-2"}', true);
+  BEGIN PERFORM iit.create_manual_deal('manual_exception', 'WAUZZZ8V7JA000622', 'Brown Fig – ACV', 'b44-de'); EXCEPTION WHEN OTHERS THEN RAISE EXCEPTION 'Z8c replacement token refused: %', SQLERRM; END;
+  BEGIN DELETE FROM iit.revoked_credentials WHERE jti = 'tok-1'; RAISE EXCEPTION 'Z8d un-revoked'; EXCEPTION WHEN SQLSTATE '42501' THEN NULL; END;
+  BEGIN INSERT INTO iit.revoked_credentials(jti, reason) VALUES ('x', 'x'); RAISE EXCEPTION 'Z8e credential role can write the revocation list'; EXCEPTION WHEN SQLSTATE '42501' THEN NULL; END;
+END $$;
+\c iit_local postgres
+DO $$ BEGIN
+  BEGIN DELETE FROM iit.revoked_credentials WHERE jti = 'tok-1'; RAISE EXCEPTION 'Z8f revocation deletable even by the owner'; EXCEPTION WHEN SQLSTATE '42501' THEN NULL; END;
+  -- the non-PostgREST path (no claims: Worker, local tests, owner SQL) is unchanged
+  IF iit.require_role('b44-de', 'data_entry') IS NULL THEN RAISE EXCEPTION 'Z8g'; END IF;
+END $$;
+
 -- Z7 the 005 Worker functions remain tav_worker-only and the integration manifest is unchanged (006 touches no other grant)
 DO $$ BEGIN
   IF NOT has_function_privilege('tav_worker', 'iit.authorize_and_consume(text,text,text,text,text,text,text,text,timestamptz)', 'EXECUTE') THEN RAISE EXCEPTION 'Z7a'; END IF;
