@@ -15,8 +15,11 @@ BEGIN;
 -- ---------------------------------------------------------------------------------------------------------------------
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'iit_owner')       THEN CREATE ROLE iit_owner NOLOGIN; END IF;
-  -- iit_integration mirrors the Base44 integration's privileged access (§2.5 risk 1): it BYPASSES RLS like Supabase's service role.
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'iit_integration') THEN CREATE ROLE iit_integration NOLOGIN BYPASSRLS; END IF;
+  -- iit_integration: the role EXECUTE on staff-facing functions is granted to. Rev 4: NO BYPASSRLS — that attribute needs a
+  -- superuser to create and Supabase's `postgres` is not one (001 would fail at application); RLS with no policies therefore
+  -- denies this role's DIRECT table writes (deny by default, §2.2), which is the better property anyway. D-2 (measured 28 Oct):
+  -- the Base44 integration executes SQL as the project's `postgres` role through the Management API — see docs/migrations/001.md.
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'iit_integration') THEN CREATE ROLE iit_integration NOLOGIN; END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tav_worker')      THEN CREATE ROLE tav_worker NOLOGIN; END IF;
 END $$;
 

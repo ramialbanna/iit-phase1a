@@ -213,12 +213,20 @@ DO $$ DECLARE r record; BEGIN
   -- set_staff_role writes activity_events (append-only, no history) — check the activity row's attribution instead
   IF NOT EXISTS (SELECT 1 FROM iit.activity_events WHERE action='role_granted' AND actor_kind='user' AND actor_id='00000000-0000-4000-8000-00000000000a') THEN RAISE EXCEPTION 'T16a activity attribution'; END IF;
 END $$;
-SET ROLE iit_integration;
-UPDATE iit.users SET display_name='Direct by integration' WHERE id='00000000-0000-4000-8000-00000000000d';
-RESET ROLE;
+-- rev 4: iit_integration has no BYPASSRLS; RLS with no policies DENIES its direct table write (0 rows, no history row)
+DO $$ DECLARE n bigint; m bigint; BEGIN
+  SELECT count(*) INTO n FROM iit.record_history;
+  SET LOCAL ROLE iit_integration;
+  UPDATE iit.users SET display_name='Direct by integration' WHERE id='00000000-0000-4000-8000-00000000000d';
+  RESET ROLE;
+  SELECT count(*) INTO m FROM iit.record_history;
+  IF m <> n OR (SELECT display_name FROM iit.users WHERE id='00000000-0000-4000-8000-00000000000d') = 'Direct by integration' THEN RAISE EXCEPTION 'T16d integration wrote a table directly (RLS not denying)'; END IF;
+END $$;
+-- a direct edit by the LOGIN role (locally the superuser; on Supabase `postgres`, which has BYPASSRLS) is captured as direct with that role
+UPDATE iit.users SET display_name='Direct by login role' WHERE id='00000000-0000-4000-8000-00000000000d';
 DO $$ DECLARE r record; BEGIN
-  SELECT exec_role, origin_role, actor_kind INTO r FROM iit.record_history WHERE table_name='users' AND record_id='00000000-0000-4000-8000-00000000000d' ORDER BY id DESC LIMIT 1;
-  IF r.exec_role <> 'iit_integration' OR r.origin_role <> 'iit_integration' OR r.actor_kind <> 'direct' THEN RAISE EXCEPTION 'T16b direct edit capture: %', r; END IF;
+  SELECT exec_role, origin_role, origin_session_role, actor_kind INTO r FROM iit.record_history WHERE table_name='users' AND record_id='00000000-0000-4000-8000-00000000000d' ORDER BY id DESC LIMIT 1;
+  IF r.exec_role <> current_user OR r.origin_role IS NOT NULL OR r.origin_session_role <> session_user OR r.actor_kind <> 'direct' THEN RAISE EXCEPTION 'T16b direct edit capture: %', r; END IF;
 END $$;
 SET ROLE iit_integration;
 SELECT iit.set_staff_identity('b44-de','Data Entry D','de@test','b44-admin');
