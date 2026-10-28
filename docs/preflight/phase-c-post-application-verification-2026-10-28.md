@@ -40,7 +40,7 @@ deployed.
 | 13 | `s2test` unchanged | **PASS** | 193/193 non-blank lines identical to the baseline: schema owner/ACL, 18 tables / 25 indexes / 6 sequences, every relation's owner, ACL, RLS flags, estimated rows and size, columns, indexes, 51 constraints, 24 function signatures/owners/SECURITY DEFINER/ACLs, 7 triggers, no policies, no types (only difference: one trailing blank line in formatting) |
 | 14a | PostgREST not exposing `iit` | **PASS (database evidence)** | no `pgrst.db_schemas` setting on `authenticator`. Supabase's exposed-schema list is project configuration, not fully visible from SQL — confirm in Dashboard → API → Exposed schemas |
 | 14b | No Base44 credential | **PASS (database evidence)** | `revoked_credentials` 0, `staff_identities` 0, no staff users. A JWT is minted outside the database, so its absence is attested, not provable here; none was minted in this work |
-| 14c | No Worker login / real-login membership | **PASS** | no login role holds membership in `tav_worker`, `iit_integration` or `iit_owner` other than the executor's ADMIN-only creator grants; `iit_base44` reachable only via `authenticator` (and V-1) |
+| 14c | No Worker login / real-login membership | **PASS** | no Worker login exists; the only login memberships involving `tav_worker`, `iit_integration` or `iit_owner` are the `postgres` deployment executor's automatic ADMIN-only creator grants on those roles plus its explicit SET-only membership in `iit_owner`; `iit_base44` reachable only via `authenticator` (and V-1) |
 | 14d | No Worker deployed / vAuto contact / live 3.1 write | **PASS (database evidence)** | `vauto_observations`, `external_references`, `appraisal_episodes`, `deals`, `gated_actions`, `gated_action_attempts`, `gated_action_events`, `work_items`, `activity_events` all 0 rows; nothing was deployed or contacted in this work |
 | 15 | No remote tests / RPCs | **PASS** | none run |
 | 16 | No change made | **PASS** | read-only transaction rolled back; no repair, grant, revoke, expose, seed or populate |
@@ -74,7 +74,7 @@ added for it; the direct IIT graph is exactly as designed. It is inherent to gra
 - Every originating-role, JWT-role, `jti`, revocation (`iit.revoked_credentials`) and staff-role check in `require_role()`
   remains mandatory on every staff function; nothing is relaxed because of this path.
 - A platform-managed database role holding an arbitrary SQL session is **outside the application credential boundary**:
-  the D-48 credential controls bound what a PostgREST caller holding an `iit_base44` token can do; they do not, and are
+  the D-48 credential controls what a PostgREST caller holding an `iit_base44` token can do; they do not, and are
   not claimed to, constrain Supabase's own service roles.
 
 ### V-2 — the per-schema default function-privilege revoke is ineffective; correct it before any new IIT function
