@@ -49,7 +49,11 @@ export function validateConfig(c: WorkerConfig): string | null {
     if (other !== undefined) return `credentials ${other} and ${name} share one secret value`;
     seen.set(secret, name);
   }
-  if (c.vauto.baseUrl && !c.vauto.baseUrl.startsWith("https://")) return "VAUTO_BASE_URL must be https";
-  if (c.vauto.tokenUrl && !c.vauto.tokenUrl.startsWith("https://")) return "VAUTO_TOKEN_URL must be https";
+  // vAuto URLs must PARSE as https URLs with a host (a prefix check is not validation — Codex Worker v0.1 rev-2 P2)
+  for (const [name, v] of [["VAUTO_BASE_URL", c.vauto.baseUrl], ["VAUTO_TOKEN_URL", c.vauto.tokenUrl]] as const) {
+    if (!v) continue;
+    let u: URL; try { u = new URL(v); } catch { return `${name} is not a valid URL`; }
+    if (u.protocol !== "https:" || !u.hostname || u.username || u.password || u.hash) return `${name} must be a plain https URL with a host and no credentials or fragment`;
+  }
   return null;
 }

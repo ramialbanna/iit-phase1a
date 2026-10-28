@@ -62,7 +62,11 @@ test("P1: duplicate credential values are a config error (500 on every route) an
   const r = await handle(req("/gate/authorize", { headers: { "x-iit-credential": "secret-a" }, body: "{}" }), dup, { db: noDb });
   assert.equal(r.status, 500); const b = await r.json() as { reason: string; detail: string };
   assert.equal(b.reason, "CONFIG_INVALID"); assert.ok(!b.detail.includes("secret-a"), "the value is never reported");
-  assert.equal(validateConfig(loadConfig({ ...ENV, VAUTO_BASE_URL: "http://vauto.example" })), "VAUTO_BASE_URL must be https");
+  assert.equal(validateConfig(loadConfig({ ...ENV, VAUTO_BASE_URL: "http://vauto.example" })), "VAUTO_BASE_URL must be a plain https URL with a host and no credentials or fragment");
+  for (const bad of ["https://", "https://user:pw@vauto.example/api", "https://vauto.example/api#frag", "ftp://vauto.example", "not a url", "vauto.example/api"]) {   // WHATWG normalizes "https:///x" and "https:/x" to a host: tolerated
+    assert.notEqual(validateConfig(loadConfig({ ...ENV, VAUTO_TOKEN_URL: bad })), null, bad);
+  }
+  assert.equal(validateConfig(loadConfig({ ...ENV, VAUTO_TOKEN_URL: "https://vauto.example:8443/oauth/token" })), null);
 });
 test("secrets never appear in config output beyond credential NAMES", () => {
   const cfg = loadConfig(ENV);
