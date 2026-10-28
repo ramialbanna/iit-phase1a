@@ -51,7 +51,7 @@ Exactly the functions whose EXECUTE 001–005 grant to `iit_integration`; migrat
 PostgREST logs in as `authenticator`, verifies the request's JWT with the project's JWT secret, and runs `SET ROLE <claims.role>`; the claims are also exposed to SQL as `request.jwt.claims` (recorded as `origin_jwt_role` on every history row, §5.9.2). The **credential** is therefore a JWT signed with the project's JWT secret whose `role` claim is `iit_base44`:
 
 ```json
-{ "role": "iit_base44", "iss": "supabase", "iat": <now>, "exp": <now + 180 days>, "jti": "<uuid>" }
+{ "role": "iit_base44", "iss": "supabase", "iat": <now>, "exp": <now + 180 days>,   -- D-48 decided 28 Oct 2026: 180 days "jti": "<uuid>" }
 ```
 Request shape from a Base44 backend function (never from the browser):
 ```
