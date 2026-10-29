@@ -66,7 +66,9 @@ Columns: `id`, `at` (clock time), `actor_user_id` (internal `users.id`), `creden
 `target_type` (`deal` · `deal_version` · `gated_action` · `report` reserved), `target_id`, `target_version`, `outcome`
 (`granted` · `not_found` · `denied`), `correlation_id` (from a well-formed `X-Correlation-Id` request header, else NULL). No
 returned data, VIN, seller data, evidence text or search term is stored. Append-only (`make_append_only`, rejected even for the
-superuser); no privilege for any role but `iit_owner`; not history-covered (it is itself the record).
+superuser); no IIT grant to any role but `iit_owner`; not history-covered (it is itself the record). Owner-only describes IIT's
+grants: platform-managed roles with `pg_read_all_data` (e.g. `postgres`) can still read it, as every `iit` table (V-3,
+`docs/preflight/migration-007-application-2026-10-29.md` §5).
 
 **Transaction semantics.** The row is written in the caller's transaction. A raised exception (credential, role, parameter,
 infrastructure) and a rolled-back caller transaction leave **no row**; those failures must be recorded at the calling server

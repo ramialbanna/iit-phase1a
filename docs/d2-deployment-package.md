@@ -66,6 +66,12 @@ Content-Type: application/json
 **To verify at application (I-D2a):** whether the project uses legacy JWT keys or the newer publishable/secret key scheme for the `apikey` gateway header; a custom-claim JWT is verified against the JWT secret either way, but the header value differs. **I-D2b:** confirm on the live project that `authenticator` is the PostgREST login role and that `SET ROLE iit_base44` succeeds for it (006 grants the membership; Z6 proves the escalation bounds from a real `authenticator` login locally).
 
 ## 5. Denials proven (006 tests, local; §7 repeats them live)
+**Scope of these denials (V-3, 29 Oct 2026).** They define IIT's *application* boundary: no direct `iit` table or sequence
+privilege for `anon`, `authenticated`, `iit_base44`, Worker callers or any ordinary application role; application access only
+through the approved RPCs; the originating-role, JWT-role, `jti`, revocation, staff-identity and staff-role checks are
+mandatory. They do not restrict Supabase's platform-managed roles: membership in `pg_read_all_data` (measured: `postgres`,
+`supabase_etl_admin`, `supabase_read_only_user`) reads every `iit` table regardless of IIT's owner-only ACLs — accepted for
+Phase 1 (`docs/preflight/migration-007-application-2026-10-29.md` §5).
 | Requirement | Test |
 |---|---|
 | Approved RPC succeeds; actor and staff-role checks still apply | Z2a (data_entry creates a deal), Z2b (auditor refused 42501), Z2c/Z2d (unknown / empty actor refused 28000), Z2e (history: `exec_role = iit_owner`, `origin_role = iit_base44`, `actor_kind = user`) |
