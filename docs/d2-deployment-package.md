@@ -103,4 +103,4 @@ Phase 1 (`docs/preflight/migration-007-application-2026-10-29.md` §5).
 5. Populate reference data that 001–005 leave to the owner (D-1 roles are seeded; D-4 vAuto channels; D-12 report rules) — data rows, reviewed.
 6. Bootstrap the first admin: insert the owner's `staff_identities` row + `admin` role as the owner (one SQL statement, logged), so `set_staff_identity` can be used for everyone else.
 7. Only then: connect Base44 screens — after migration 007 is reviewed and applied (separately authorized) **and** the stale-write pre-connection gate in `docs/migrations/007-stale-write-gap-report.md` §4 is closed.
-Not in this sequence: the Worker (D-46 login role, D-40, I-V1–3), the bridge, `s2test` teardown.
+Not in this sequence: the Worker (D-46 login role, D-40, I-V1–3), the bridge, `s2test` teardown, and the Logistics read interface (migration 008, its own role `iit_logistics_reader` and credential — `docs/migrations/008.md` §5).

@@ -1,5 +1,9 @@
 # 008 — Logistics read interface: planning note (NOT a migration)
 
+> **Implemented (29 Oct 2026)** in `supabase/migrations/20261028000108_logistics_read_interface.sql`; decisions and defaults
+> applied, including where they differ from this plan (D-5 check order, D-6 linked-only 3.1 resolution, D-7 status keys,
+> D-8 per-position invalid VINs): `docs/migrations/008.md`. This note is kept as the planning record.
+
 **Status:** planning only, on branch `docs/008-logistics-read-requirements`. No SQL, role, grant, function, table, credential or secret is created by this PR. Nothing is applied anywhere.
 **Base:** `main` @ `f72924f` (PR #12 merged: non-superuser executor `SET ROLE iit_owner`; `authenticator` memberships SET-only. PR #14 merged: post-application verification and decisions V-1/V-2).
 **Input:** `docs/migrations/008-logistics-requirements-v2.1.md` (TAVOps Logistics handoff, with owner amendment A1 on correlation ids).
