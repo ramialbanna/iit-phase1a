@@ -29,21 +29,21 @@ END $$;
 
 -- X3 iit_owner (and every IIT role) stays NOLOGIN and unprivileged
 DO $$ BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('iit_owner','iit_integration','tav_worker','iit_base44')
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('iit_owner','iit_integration','tav_worker','iit_base44','iit_logistics_reader')
               AND (rolcanlogin OR rolsuper OR rolbypassrls OR rolcreaterole OR rolcreatedb OR rolreplication)) THEN RAISE EXCEPTION 'X3 an IIT role can log in or is privileged'; END IF;
-  IF (SELECT count(*) FROM pg_roles WHERE rolname IN ('iit_owner','iit_integration','tav_worker','iit_base44')) <> 4 THEN RAISE EXCEPTION 'X3b IIT roles missing'; END IF;
+  IF (SELECT count(*) FROM pg_roles WHERE rolname IN ('iit_owner','iit_integration','tav_worker','iit_base44','iit_logistics_reader')) <> 5 THEN RAISE EXCEPTION 'X3b IIT roles missing'; END IF;
 END $$;
 
--- X4 the complete membership graph of the IIT roles: deployer's CREATEROLE auto-grants (ADMIN only) on all four, deployer's
--- SET-only grant on iit_owner, authenticator's SET-only grant on iit_base44 (006). Nothing else — no IIT role is a member of
--- anything either.
+-- X4 the complete membership graph of the IIT roles: deployer's CREATEROLE auto-grants (ADMIN only) on all five, deployer's
+-- SET-only grant on iit_owner, authenticator's SET-only grants on iit_base44 (006) and iit_logistics_reader (008). Nothing
+-- else — no IIT role is a member of anything either.
 DO $$ DECLARE extra text; BEGIN
   SELECT string_agg(format('%s<-%s(by %s a=%s i=%s s=%s)', r.rolname, m.rolname, g.rolname, am.admin_option, am.inherit_option, am.set_option), '; ') INTO extra
     FROM pg_auth_members am JOIN pg_roles r ON r.oid=am.roleid JOIN pg_roles m ON m.oid=am.member JOIN pg_roles g ON g.oid=am.grantor
-   WHERE (r.rolname IN ('iit_owner','iit_integration','tav_worker','iit_base44') OR m.rolname IN ('iit_owner','iit_integration','tav_worker','iit_base44'))
+   WHERE (r.rolname IN ('iit_owner','iit_integration','tav_worker','iit_base44','iit_logistics_reader') OR m.rolname IN ('iit_owner','iit_integration','tav_worker','iit_base44','iit_logistics_reader'))
      AND NOT (m.rolname='deployer' AND g.rolsuper AND am.admin_option AND NOT am.inherit_option AND NOT am.set_option)
      AND NOT (r.rolname='iit_owner' AND m.rolname='deployer' AND g.rolname='deployer' AND am.set_option AND NOT am.inherit_option AND NOT am.admin_option)
-     AND NOT (r.rolname='iit_base44' AND m.rolname='authenticator' AND am.set_option AND NOT am.inherit_option AND NOT am.admin_option);
+     AND NOT (r.rolname IN ('iit_base44','iit_logistics_reader') AND m.rolname='authenticator' AND am.set_option AND NOT am.inherit_option AND NOT am.admin_option);
   IF extra IS NOT NULL THEN RAISE EXCEPTION 'X4 unexpected IIT role memberships: %', extra; END IF;
 END $$;
 
