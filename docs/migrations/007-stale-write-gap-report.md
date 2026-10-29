@@ -1,6 +1,6 @@
 # Migration 007 — stale-write gap report (Base44 mutation adapters → IIT write functions)
 
-Status: **rev 1, 29 Oct 2026, for owner and Codex review.** Owner decision F: 007 does not change any of the 27 write
+Status: **rev 2, 29 Oct 2026, for owner and Codex review** (rev 2: token coverage reference, Codex PR #15 P2). Owner decision F: 007 does not change any of the 27 write
 signatures; **before Base44 is connected to production, every state-dependent mutation must require an authoritative
 expected-state token, with omission refused, or have equivalent database-enforced protection.** This is a mandatory
 pre-connection gate, not optional future work. Nothing in this report is implemented yet.
@@ -10,7 +10,8 @@ A write is protected when the database itself refuses it if the state the user s
 bypass that refusal. Today the 27 functions take no expected-state argument. Some refuse on their target's own state under a
 row lock (shown below); that protects the target record, **not** the rest of the screen the user acted on. 007 supplies the
 token every write would check: `get_deal.state_token` (`iit._deal_state_token`) and `get_unknown_outcome.state_token`
-(`iit._action_state_token`), both recomputable inside a write under the Deal lock.
+(`iit._action_state_token`), both recomputable inside a write under the Deal lock. Exactly what each token covers — and what it
+deliberately does not — is the inventory in `007-contract-worksheet.md` §2.5; a write's check can rely on nothing outside it.
 
 Legend: **G** = gap (no stale-state protection) · **P** = partial (target-state check only) · **E** = equivalent protection for
 the decision being made · **U** = no IIT write path (mock-only or deferred).

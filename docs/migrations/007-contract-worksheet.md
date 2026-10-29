@@ -1,6 +1,6 @@
 # Migration 007 — staff read RPC contract (approved direction)
 
-Status: **rev 1, 29 Oct 2026 — owner decisions A–H, Q1 and Q2 applied; implemented in
+Status: **rev 2, 29 Oct 2026 — owner decisions A–H, Q1 and Q2 applied; Codex PR #15 review (P1 admin visibility, P2 state-token coverage) applied; implemented in
 `supabase/migrations/20261028000107_staff_read_rpcs.sql`; for Codex review.** Not applied to Supabase. Sources: the owner's
 decision messages of 29 Oct 2026, the Base44 mock-service contract export (prototype only; 11 query adapters, 15 mutation
 adapters, 1 identity method), `docs/d2-deployment-package.md`, migrations 001–006 as merged (`main` at `8205530`).
@@ -75,12 +75,40 @@ caller's visibility — therefore return the not-found envelope instead of raisi
 and `get_unknown_outcome` are `VOLATILE` for this reason (PostgREST runs them read-write on `POST`); every other read is
 `STABLE`.
 
-### 2.5 State tokens
-`state_token = 'v1:' || md5(…)` over every canonical row the deal screens display or a state-dependent write depends on (deal,
-vehicle, versions, title, lien, parties, consignment, flags, holds, requirements, validation/waiver/revocation watermarks,
-reports, attempts, decision watermark, work items, corrections, amendments, gate actions). It is computed by
-`iit._deal_state_token(deal)`, never stored, so a future expected-state check inside a write can recompute the same value under
-the Deal lock (gap report §3). `get_unknown_outcome` returns `iit._action_state_token(action)`, which also covers the deal token.
+### 2.5 State tokens (rev 2, Codex P2)
+`state_token = 'v1:' || md5(…)`, computed by `iit._deal_state_token(deal)`, never stored, so a future expected-state check
+inside a write can recompute the same value under the Deal lock (gap report §3). It is one md5 over named categories. A
+**mutable** table enters as its full rows (`to_jsonb`, ordered by key; hashed only, never returned). An **append-only** table
+enters as a deterministic watermark — its rows never change or disappear, so the watermark moves on every accepted append.
+
+| Category | What enters the token | Covers in `get_deal` |
+|---|---|---|
+| `deal` | full `deals` row | `deal`, `purchase`, `version.current_version_no`, eligibility inputs |
+| `vehicle` | full `vehicles` row | `vehicle`, VIN-based requirements |
+| `source_channel` | full row of the deal's channel | `deal.source_channel`, missing-fact `source_channel` |
+| `fact_rules` | `required_fact_rules` rows for the deal's origin | `missing_required_facts`, release eligibility |
+| `versions` | every `deal_versions` row except `snapshot` | `version`, frozen `version`, eligibility |
+| `title`, `lien`, `consignment` | full rows | those sections |
+| `parties` | full `deal_parties` + `seller_parties` rows | `parties`, frozen parties (same rows) |
+| `organizations` | `(id, name)` of business sellers and the lienholder | `business_org`, `lienholder` |
+| `flags`, `holds`, `requirements`, `reports`, `attempts`, `work_items`, `gated_actions` | full rows of `intake_flags`, `audit_holds`, `deal_report_requirements`, `external_vehicle_reports`, `prequalification_checks`, `work_items` (all roles, not only the caller's), `gated_actions` | those sections, requirement satisfaction, approval eligibility |
+| `validations_wm`, `waivers_wm`, `revocations_wm` | `max(report_validations.id)`, `max(report_waivers.seq)`, `max(report_waiver_revocations.id)` | requirement satisfaction |
+| `decisions_wm` | `max(audit_decisions.seq)` over the deal's attempts | `current_attempt.decisions`, approval eligibility |
+| `corrections_wm`, `amendments_wm` | `(count, max(at))` of `material_corrections`; `max(deal_amendments.id)` | `corrections` |
+| `activity_wm` | `max(activity_events.id)` for the deal | `activity` |
+| `users` | `(id, display_name)` of every user the sections reference (buyer, closer, releaser, correction and amendment authors, deciders, activity actors) | every staff reference |
+
+Not in the token, deliberately: `deal_versions.snapshot` (written once at release; the version's `status`/`released_at` change
+with it), `record_history` and `read_access_audit` (telemetry — a read never changes the token), any column of
+`organizations`/`users` other than those listed, and tables `get_deal` does not read. The token does **not** cover reference
+data that only stored rows depend on (e.g. `report_requirement_rules`, which act through `compute_requirements` into
+`deal_report_requirements`, which is covered).
+
+`get_unknown_outcome.state_token` = `iit._action_state_token(action)`: md5 over the full `gated_actions` row, its full
+`gated_action_attempts` rows, `max(gated_action_events.id)`, the full rows of its linked `work_items`, and the deal token.
+
+Proven by test R13 (one isolated accepted change per category; repeated reads, read-audit rows and other deals' changes leave
+the token unchanged) and by one mutant per category that removes it from the token.
 
 ## 3. Base44 adapter mapping
 
@@ -89,7 +117,7 @@ the Deal lock (gap report §3). `get_unknown_outcome` returns `iit._action_state
 | `getMockIdentity` (identity) | `get_my_profile` | Roles from `user_roles`; the client-supplied `mockRole` and role switcher are removed (G). |
 | `queryDataEntrySummary` | `get_dashboard_summary` → `data.data_entry` | Counts in §4.7; mock-only cards deferred (§5). |
 | `queryRiskAuditSummary` | `get_dashboard_summary` → `data.risk_audit` | Counts in §4.7; "today" and aging cards deferred. |
-| `queryDataEntryQueue` | `list_work_items(p_kind, p_status, …)` | Server filters: kind, status. Other mock filters deferred (§5); nav badge = a list call. |
+| `queryDataEntryQueue` | `list_work_items(p_kind, p_status, …)` | data_entry/auditor/audit_lead; server filters: kind, status. Other mock filters deferred (§5); nav badge = a list call. |
 | `queryConsignmentQueue` | `list_work_items('consignment_setup', …)` | Derived deal rows (Q1). |
 | `queryRiskAuditQueue` | `list_audit_queue(p_queue, …)` | `p_queue`: NULL / `open` / `escalated`. Assignment and auditor filter deferred (no IIT assignment). |
 | `queryDealDetail` | `get_deal(p_deal, NULL, …)` | Role projections (§4.2). |
@@ -143,7 +171,7 @@ re-projected through the same allowlist (seller phone/email DE only; no ids beyo
 `requirement_satisfaction[]` ← that version's `deal_report_requirements` + `iit.requirement_satisfied`.
 
 ### 4.3 `list_work_items(p_kind text, p_status text, p_limit int, p_cursor text, p_actor_base44_user_id text) → jsonb`
-Roles: any staff role; rows where `assigned_role` is a role the caller holds (no role parameter). `consignment_setup`: Data Entry only.
+Roles (rev 2, Codex P1): **data_entry, auditor, audit_lead only**. Rows: stored items whose `assigned_role` is one of those operational roles that the caller actually holds (no role parameter). Admin-assigned items are returned to nobody; an admin-only caller gets `ROLE_MISSING: list_work_items` before any work item, deal or parameter is read — the same refusal whatever rows exist. Admin's read surface is `list_staff('admin', …)` only. `consignment_setup`: Data Entry only.
 Filters: `p_kind` NULL (all stored kinds) · one of the 17 `work_items_kind_check` kinds · `consignment_setup`. `p_status`
 NULL/`open` · `closed` (derived rows: open only). Ordering: open `(opened_at, id)`; closed `(closed_at DESC, id DESC)`;
 derived `deal_number`. Not audited.

@@ -132,31 +132,54 @@ CREATE FUNCTION iit._jsonb_pick(p_obj jsonb, p_keys text[]) RETURNS jsonb LANGUA
               ELSE coalesce((SELECT pg_catalog.jsonb_object_agg(e.key, e.value) FROM pg_catalog.jsonb_each(p_obj) e WHERE e.key = ANY (p_keys)), '{}'::jsonb) END $$;
 REVOKE ALL ON FUNCTION iit._jsonb_pick(jsonb,text[]) FROM PUBLIC;
 
--- Authoritative deal state token (owner F): a hash over every canonical row a deal screen displays or a state-dependent
--- write depends on. Any accepted change to the deal or its children changes it; it is computed, never stored, so a future
--- expected-state check in a write function can recompute exactly the same value under the Deal lock.
+-- Deal state token (owner F; Codex PR #15 P2). Covers every mutable value get_deal returns and every value its eligibility
+-- computations read, as one md5 over named categories: mutable tables as full ordered row projections (to_jsonb, hashed only —
+-- never returned); append-only tables as deterministic watermarks (max id / max seq / row count, sufficient because their rows
+-- never change or disappear). Reference rows the screen displays (source channel, organization names, staff display names) and
+-- the required-fact rules behind missing_required_facts are included. Excluded on purpose: deal_versions.snapshot (written once
+-- at release; the version's status/released_at cover the event), record_history and read_access_audit (telemetry), and every
+-- table get_deal does not read. Computed, never stored, so a future expected-state check in a write can recompute it under the
+-- Deal lock. Exact inventory: docs/migrations/007-contract-worksheet.md §2.5.
 CREATE FUNCTION iit._deal_state_token(p_deal uuid) RETURNS text LANGUAGE sql STABLE SET search_path = '' AS $$
-  SELECT 'v1:' || pg_catalog.md5(pg_catalog.jsonb_build_array(
-    (SELECT pg_catalog.to_jsonb(d) FROM iit.deals d WHERE d.id = p_deal),
-    (SELECT pg_catalog.to_jsonb(v) FROM iit.deals d JOIN iit.vehicles v ON v.id = d.vehicle_id WHERE d.id = p_deal),
-    (SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_array(x.version_no, x.status, x.released_at) ORDER BY x.version_no) FROM iit.deal_versions x WHERE x.deal_id = p_deal),
-    (SELECT pg_catalog.to_jsonb(t) FROM iit.deal_titles t WHERE t.deal_id = p_deal),
-    (SELECT pg_catalog.to_jsonb(l) FROM iit.deal_liens l WHERE l.deal_id = p_deal),
-    (SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_array(pg_catalog.to_jsonb(dp), pg_catalog.to_jsonb(sp)) ORDER BY dp.id) FROM iit.deal_parties dp JOIN iit.seller_parties sp ON sp.id = dp.party_id WHERE dp.deal_id = p_deal),
-    (SELECT pg_catalog.to_jsonb(c) FROM iit.consignments c WHERE c.deal_id = p_deal),
-    (SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_array(f.id, f.status, f.blocks_release) ORDER BY f.id) FROM iit.intake_flags f WHERE f.deal_id = p_deal),
-    (SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_array(h.id, h.released_at, h.covering_check_id, h.covers_version_no) ORDER BY h.id) FROM iit.audit_holds h WHERE h.deal_id = p_deal),
-    (SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_array(q.version_no, q.requirement_key, q.computed_at) ORDER BY q.version_no, q.requirement_key) FROM iit.deal_report_requirements q WHERE q.deal_id = p_deal),
-    (SELECT max(rv.id) FROM iit.report_validations rv WHERE rv.deal_id = p_deal),
-    (SELECT max(w.seq) FROM iit.report_waivers w WHERE w.deal_id = p_deal),
-    (SELECT count(*) FROM iit.report_waiver_revocations r JOIN iit.report_waivers w ON w.id = r.waiver_id WHERE w.deal_id = p_deal),
-    (SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_array(r.id, r.file_recorded_at) ORDER BY r.id) FROM iit.external_vehicle_reports r WHERE r.deal_id = p_deal),
-    (SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_array(c.id, c.status) ORDER BY c.id) FROM iit.prequalification_checks c WHERE c.deal_id = p_deal),
-    (SELECT max(a.seq) FROM iit.audit_decisions a JOIN iit.prequalification_checks c ON c.id = a.check_id WHERE c.deal_id = p_deal),
-    (SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_array(w.id, w.status, w.assigned_role) ORDER BY w.id) FROM iit.work_items w WHERE w.deal_id = p_deal),
-    (SELECT count(*) FROM iit.material_corrections m WHERE m.deal_id = p_deal),
-    (SELECT max(a.id) FROM iit.deal_amendments a WHERE a.deal_id = p_deal),
-    (SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_array(g.id, g.state, g.current_attempt_id) ORDER BY g.id) FROM iit.gated_actions g WHERE g.deal_id = p_deal)
+  WITH d AS (SELECT * FROM iit.deals WHERE id = p_deal),
+  checks AS (SELECT * FROM iit.prequalification_checks WHERE deal_id = p_deal),
+  waivers AS (SELECT * FROM iit.report_waivers WHERE deal_id = p_deal),
+  referenced_users AS (
+    SELECT buyer_id AS id FROM d UNION SELECT closer_id FROM d
+    UNION SELECT released_by FROM iit.deal_versions WHERE deal_id = p_deal
+    UNION SELECT m.by FROM iit.material_corrections m WHERE m.deal_id = p_deal
+    UNION SELECT a.by FROM iit.deal_amendments a WHERE a.deal_id = p_deal
+    UNION SELECT decided_by FROM iit.audit_decisions WHERE check_id IN (SELECT id FROM checks)
+    UNION SELECT actor_id FROM iit.activity_events WHERE deal_id = p_deal),
+  referenced_orgs AS (
+    SELECT sp.business_org_id AS id FROM iit.deal_parties dp JOIN iit.seller_parties sp ON sp.id = dp.party_id WHERE dp.deal_id = p_deal
+    UNION SELECT lienholder_org_id FROM iit.deal_liens WHERE deal_id = p_deal)
+  SELECT 'v1:' || pg_catalog.md5(pg_catalog.jsonb_build_object(
+    'deal',           (SELECT pg_catalog.to_jsonb(x) FROM d x),
+    'vehicle',        (SELECT pg_catalog.to_jsonb(v) FROM d JOIN iit.vehicles v ON v.id = d.vehicle_id),
+    'source_channel', (SELECT pg_catalog.to_jsonb(sc) FROM d JOIN iit.source_channels sc ON sc.id = d.source_channel_id),
+    'fact_rules',     (SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(r) ORDER BY r.fact) FROM iit.required_fact_rules r WHERE r.origin = (SELECT origin FROM d)),
+    'versions',       (SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(x) - 'snapshot' ORDER BY x.version_no) FROM iit.deal_versions x WHERE x.deal_id = p_deal),
+    'title',          (SELECT pg_catalog.to_jsonb(t) FROM iit.deal_titles t WHERE t.deal_id = p_deal),
+    'lien',           (SELECT pg_catalog.to_jsonb(l) FROM iit.deal_liens l WHERE l.deal_id = p_deal),
+    'parties',        (SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_array(pg_catalog.to_jsonb(dp), pg_catalog.to_jsonb(sp)) ORDER BY dp.id) FROM iit.deal_parties dp JOIN iit.seller_parties sp ON sp.id = dp.party_id WHERE dp.deal_id = p_deal),
+    'organizations',  (SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_array(o.id, o.name) ORDER BY o.id) FROM iit.organizations o WHERE o.id IN (SELECT id FROM referenced_orgs)),
+    'consignment',    (SELECT pg_catalog.to_jsonb(c) FROM iit.consignments c WHERE c.deal_id = p_deal),
+    'flags',          (SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(f) ORDER BY f.id) FROM iit.intake_flags f WHERE f.deal_id = p_deal),
+    'holds',          (SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(h) ORDER BY h.id) FROM iit.audit_holds h WHERE h.deal_id = p_deal),
+    'requirements',   (SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(q) ORDER BY q.version_no, q.requirement_key) FROM iit.deal_report_requirements q WHERE q.deal_id = p_deal),
+    'reports',        (SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(r) ORDER BY r.id) FROM iit.external_vehicle_reports r WHERE r.deal_id = p_deal),
+    'validations_wm', (SELECT max(rv.id) FROM iit.report_validations rv WHERE rv.deal_id = p_deal),
+    'waivers_wm',     (SELECT max(w.seq) FROM waivers w),
+    'revocations_wm', (SELECT max(r.id) FROM iit.report_waiver_revocations r WHERE r.waiver_id IN (SELECT id FROM waivers)),
+    'attempts',       (SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(c) ORDER BY c.id) FROM checks c),
+    'decisions_wm',   (SELECT max(a.seq) FROM iit.audit_decisions a WHERE a.check_id IN (SELECT id FROM checks)),
+    'work_items',     (SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(w) ORDER BY w.id) FROM iit.work_items w WHERE w.deal_id = p_deal),
+    'corrections_wm', (SELECT pg_catalog.jsonb_build_array(count(*), max(m.at)) FROM iit.material_corrections m WHERE m.deal_id = p_deal),
+    'amendments_wm',  (SELECT max(a.id) FROM iit.deal_amendments a WHERE a.deal_id = p_deal),
+    'activity_wm',    (SELECT max(e.id) FROM iit.activity_events e WHERE e.deal_id = p_deal),
+    'users',          (SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_array(u.id, u.display_name) ORDER BY u.id) FROM iit.users u WHERE u.id IN (SELECT id FROM referenced_users)),
+    'gated_actions',  (SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(g) ORDER BY g.id) FROM iit.gated_actions g WHERE g.deal_id = p_deal)
   )::text) $$;
 REVOKE ALL ON FUNCTION iit._deal_state_token(uuid) FROM PUBLIC;
 
@@ -165,7 +188,7 @@ CREATE FUNCTION iit._action_state_token(p_action uuid) RETURNS text LANGUAGE sql
     (SELECT pg_catalog.to_jsonb(g) FROM iit.gated_actions g WHERE g.id = p_action),
     (SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(a) ORDER BY a.attempt_no) FROM iit.gated_action_attempts a WHERE a.action_id = p_action),
     (SELECT max(e.id) FROM iit.gated_action_events e WHERE e.action_id = p_action),
-    (SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_array(w.id, w.status) ORDER BY w.id) FROM iit.work_items w WHERE w.gated_action_id = p_action),
+    (SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(w) ORDER BY w.id) FROM iit.work_items w WHERE w.gated_action_id = p_action),
     (SELECT iit._deal_state_token(g.deal_id) FROM iit.gated_actions g WHERE g.id = p_action)
   )::text) $$;
 REVOKE ALL ON FUNCTION iit._action_state_token(uuid) FROM PUBLIC;
@@ -424,13 +447,15 @@ BEGIN
 END $$;
 REVOKE ALL ON FUNCTION iit.get_deal(uuid,int,text) FROM PUBLIC;
 
--- 3.3 work queue: stored work items assigned to any role the caller holds, or (p_kind = 'consignment_setup', Data Entry)
--- the derived consignment rows. p_status: 'open' (default) | 'closed'; derived rows are 'open' only.
+-- 3.3 work queue (data_entry, auditor, audit_lead — never admin: owner B.1, Codex PR #15 P1): stored work items assigned to an
+-- operational role the caller holds, or (p_kind = 'consignment_setup', Data Entry) the derived consignment rows. An admin-only
+-- caller is refused by _require_read before any work item or deal is read; an admin who also holds an operational role still
+-- never sees admin-assigned items. p_status: 'open' (default) | 'closed'; derived rows are 'open' only.
 CREATE FUNCTION iit.list_work_items(p_kind text, p_status text, p_limit int, p_cursor text, p_actor_base44_user_id text) RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER STABLE SET search_path = '' AS $$
 DECLARE c record; v_lim int; v_status text; q text; cur jsonb; v_items jsonb; v_n int; v_last record; v_next text;
 BEGIN
-  SELECT * INTO c FROM iit._require_read(p_actor_base44_user_id, ARRAY['admin','audit_lead','auditor','data_entry'], 'list_work_items');
+  SELECT * INTO c FROM iit._require_read(p_actor_base44_user_id, ARRAY['audit_lead','auditor','data_entry'], 'list_work_items');
   v_lim := iit._page_limit(p_limit);
   v_status := coalesce(p_status, 'open');
   IF v_status NOT IN ('open','closed') THEN RAISE EXCEPTION 'INVALID_PARAMETER: p_status' USING ERRCODE = '22023'; END IF;

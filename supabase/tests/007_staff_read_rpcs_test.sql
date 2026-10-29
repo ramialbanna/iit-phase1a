@@ -106,17 +106,20 @@ INSERT INTO iit.users(id, display_name, email) VALUES
   ('00000000-0000-4000-8007-000000000004','T7 Admin','t7-adm@example.test'),
   ('00000000-0000-4000-8007-000000000005','T7 None','t7-none@example.test'),
   ('00000000-0000-4000-8007-000000000006','T7 Gone','t7-gone@example.test'),
-  ('00000000-0000-4000-8007-000000000007','T7 Multi','t7-multi@example.test');
+  ('00000000-0000-4000-8007-000000000007','T7 Multi','t7-multi@example.test'),
+  ('00000000-0000-4000-8007-000000000008','T7 Admin Entry','t7-admde@example.test');
 INSERT INTO iit.staff_identities(base44_user_id, user_id) VALUES
   ('b44-7-de','00000000-0000-4000-8007-000000000001'), ('b44-7-aud','00000000-0000-4000-8007-000000000002'),
   ('b44-7-lead','00000000-0000-4000-8007-000000000003'), ('b44-7-adm','00000000-0000-4000-8007-000000000004'),
-  ('b44-7-none','00000000-0000-4000-8007-000000000005'), ('b44-7-multi','00000000-0000-4000-8007-000000000007');
+  ('b44-7-none','00000000-0000-4000-8007-000000000005'), ('b44-7-multi','00000000-0000-4000-8007-000000000007'),
+  ('b44-7-admde','00000000-0000-4000-8007-000000000008');
 INSERT INTO iit.staff_identities(base44_user_id, user_id, active, deactivated_at) VALUES ('b44-7-gone','00000000-0000-4000-8007-000000000006', false, now());
 INSERT INTO iit.user_roles(user_id, role) VALUES
   ('00000000-0000-4000-8007-000000000001','data_entry'), ('00000000-0000-4000-8007-000000000002','auditor'),
   ('00000000-0000-4000-8007-000000000003','auditor'), ('00000000-0000-4000-8007-000000000003','audit_lead'),
   ('00000000-0000-4000-8007-000000000004','admin'), ('00000000-0000-4000-8007-000000000006','data_entry'),
-  ('00000000-0000-4000-8007-000000000007','data_entry'), ('00000000-0000-4000-8007-000000000007','auditor');
+  ('00000000-0000-4000-8007-000000000007','data_entry'), ('00000000-0000-4000-8007-000000000007','auditor'),
+  ('00000000-0000-4000-8007-000000000008','admin'), ('00000000-0000-4000-8007-000000000008','data_entry');
 INSERT INTO iit.source_channels(name, route, origin) VALUES ('TEST7 Audit','risk_audit','manual_exception');
 INSERT INTO iit.source_channels(name, route, origin, active) VALUES ('TEST7 Off','skip_audit','manual_exception', false);
 INSERT INTO iit.vehicles(id, vin, year, make_text, model_text) VALUES
@@ -183,7 +186,7 @@ CREATE TEMP TABLE t7_calls(label text PRIMARY KEY, sql text NOT NULL, allowed te
 INSERT INTO t7_calls VALUES
  ('get_my_profile',         'SELECT iit.get_my_profile(%1$s)', ARRAY['de','aud','lead','adm','none','multi']),
  ('get_deal',               'SELECT iit.get_deal(''00000000-0000-4000-8007-0000000000d1'', NULL, %1$s)', ARRAY['de','aud','lead','multi']),
- ('list_work_items',        'SELECT iit.list_work_items(NULL, NULL, NULL, NULL, %1$s)', ARRAY['de','aud','lead','adm','multi']),
+ ('list_work_items',        'SELECT iit.list_work_items(NULL, NULL, NULL, NULL, %1$s)', ARRAY['de','aud','lead','multi']),
  ('list_work_items_consign','SELECT iit.list_work_items(''consignment_setup'', NULL, NULL, NULL, %1$s)', ARRAY['de','multi']),
  ('list_audit_queue',       'SELECT iit.list_audit_queue(NULL, NULL, NULL, %1$s)', ARRAY['aud','lead','multi']),
  ('list_audit_queue_esc',   'SELECT iit.list_audit_queue(''escalated'', NULL, NULL, %1$s)', ARRAY['lead']),
@@ -505,7 +508,6 @@ DO $$ DECLARE j jsonb; items jsonb; tok1 text; tok2 text; BEGIN
   IF EXISTS (SELECT 1 FROM jsonb_array_elements(items) e WHERE e ->> 'record_type' <> 'work_item' OR e ->> 'assigned_role' <> 'data_entry') THEN RAISE EXCEPTION 'R10i'; END IF;
   items := iit.list_work_items(NULL, NULL, 100, NULL, 'b44-7-aud') -> 'items';
   IF items::text NOT LIKE '%0000000000c3%' OR items::text LIKE '%0000000000c1%' OR items::text LIKE '%0000000000c4%' THEN RAISE EXCEPTION 'R10j auditor items'; END IF;
-  IF (iit.list_work_items(NULL, NULL, 100, NULL, 'b44-7-adm') -> 'items')::text NOT LIKE '%0000000000c4%' THEN RAISE EXCEPTION 'R10k admin items'; END IF;
   items := iit.list_work_items('restart_candidate', NULL, 100, NULL, 'b44-7-de') -> 'items';
   IF items::text NOT LIKE '%0000000000c2%' OR items::text LIKE '%0000000000c1%' THEN RAISE EXCEPTION 'R10l kind filter'; END IF;
   IF (iit.list_work_items(NULL, 'closed', 100, NULL, 'b44-7-de') -> 'items')::text NOT LIKE '%0000000000c5%' THEN RAISE EXCEPTION 'R10m closed'; END IF;
@@ -579,5 +581,107 @@ DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM iit.record_history WHERE table_name = 'read_access_audit') THEN RAISE EXCEPTION 'R11a audit rows went through history'; END IF;
   IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'iit.read_access_audit'::regclass AND NOT tgisinternal AND tgname <> 'zz_append_only') THEN RAISE EXCEPTION 'R11b unexpected trigger'; END IF;
 END $$;
+
+-- R12 admin has no operational visibility (owner B.1; Codex PR #15 P1): an admin-only caller is refused by list_work_items
+-- before any work item, deal or parameter is looked at — the same refusal whether matching admin-assigned rows exist (c4,
+-- legacy_match) or not, for every filter, and carrying no identifier; an admin who also holds data_entry sees Data Entry items
+-- only, never admin-assigned ones; admin alone is refused by every operational read
+DO $$ DECLARE m text; ms text[] := '{}'; args text; BEGIN
+  IF NOT EXISTS (SELECT 1 FROM iit.work_items WHERE id = '00000000-0000-4000-8007-0000000000c4' AND assigned_role = 'admin' AND status = 'open') THEN RAISE EXCEPTION 'R12a fixture'; END IF;
+  IF EXISTS (SELECT 1 FROM iit.work_items WHERE kind = 'duplicate_row' AND assigned_role = 'admin') THEN RAISE EXCEPTION 'R12b fixture'; END IF;
+  FOREACH args IN ARRAY ARRAY['NULL, NULL, NULL, NULL', '''legacy_match'', NULL, 100, NULL', '''duplicate_row'', NULL, NULL, NULL', '''consignment_setup'', NULL, NULL, NULL',
+                              'NULL, ''closed'', NULL, NULL', '''no_such_kind'', ''bogus'', 1000, ''forged-cursor'''] LOOP
+    BEGIN EXECUTE format('SELECT iit.list_work_items(%s, %L)', args, 'b44-7-adm'); RAISE EXCEPTION 'R12c admin listed work items (%)', args;
+    EXCEPTION WHEN SQLSTATE '42501' THEN GET STACKED DIAGNOSTICS m = MESSAGE_TEXT; ms := ms || m; END;
+  END LOOP;
+  IF (SELECT count(DISTINCT x) FROM unnest(ms) x) <> 1 OR ms[1] <> 'ROLE_MISSING: list_work_items' THEN RAISE EXCEPTION 'R12d refusals differ or carry data: %', ms; END IF;
+  IF array_to_string(ms, ' ') ~* '[0-9a-f]{8}-[0-9a-f]{4}-|T7VIN|legacy_match' THEN RAISE EXCEPTION 'R12e refusal carries an identifier'; END IF;
+  -- admin + data_entry: Data Entry rows only; the admin-assigned item never appears, in any filter or status
+  IF (iit.list_work_items(NULL, NULL, 100, NULL, 'b44-7-admde') -> 'items')::text NOT LIKE '%0000000000c2%'
+     OR (iit.list_work_items(NULL, NULL, 100, NULL, 'b44-7-admde') || iit.list_work_items('legacy_match', NULL, 100, NULL, 'b44-7-admde')
+         || iit.list_work_items(NULL, 'closed', 100, NULL, 'b44-7-admde'))::text LIKE '%0000000000c4%'
+     OR EXISTS (SELECT 1 FROM jsonb_array_elements(iit.list_work_items(NULL, NULL, 100, NULL, 'b44-7-admde') -> 'items') e WHERE e ->> 'assigned_role' <> 'data_entry')
+    THEN RAISE EXCEPTION 'R12f admin role contributed visibility'; END IF;
+  -- admin alone: refused by every operational read (deal, queues, search, dashboard, unknown outcomes, channels)
+  FOREACH args IN ARRAY ARRAY['SELECT iit.get_deal(''00000000-0000-4000-8007-0000000000d1'', NULL, %L)', 'SELECT iit.list_audit_queue(NULL, NULL, NULL, %L)',
+                              'SELECT iit.search_deals(''vin'', ''T7VIN00000000000A1'', NULL, NULL, %L)', 'SELECT iit.get_dashboard_summary(%L)',
+                              'SELECT iit.list_unknown_outcomes(NULL, NULL, %L)', 'SELECT iit.get_unknown_outcome(''00000000-0000-4000-8007-0000000000f1'', %L)',
+                              'SELECT iit.list_source_channels(NULL, NULL, %L)', 'SELECT iit.list_staff(''auditor_selector'', false, NULL, NULL, %L)'] LOOP
+    BEGIN EXECUTE format(args, 'b44-7-adm'); RAISE EXCEPTION 'R12g admin allowed: %', args; EXCEPTION WHEN SQLSTATE '42501' THEN NULL; END;
+  END LOOP;
+  IF iit.list_staff('admin', true, 100, NULL, 'b44-7-adm') ->> 'status' <> 'ok' THEN RAISE EXCEPTION 'R12h admin staff list'; END IF;
+END $$;
+
+-- R13 state token coverage (Codex PR #15 P2), in a rolled-back transaction: repeated reads, read-audit rows and changes to
+-- other deals leave a deal's token unchanged; one representative accepted change in each covered category — made alone, so
+-- that a category missing from the token fails here — changes it. %1$s = D3, %2$s = D1 (attempts, decisions, gate actions),
+-- %3$s = D5 (consignment).
+BEGIN;
+CREATE TEMP TABLE t7_token_cases(n int PRIMARY KEY, label text NOT NULL, deal text NOT NULL, stmt text NOT NULL);
+INSERT INTO t7_token_cases VALUES
+ ( 1,'deal row',           'd3', 'UPDATE iit.deals SET dealer_auction_name = ''T7 auction'' WHERE id = %1$L'),
+ ( 2,'vehicle',            'd3', 'UPDATE iit.vehicles SET exterior_color = ''T7 red'' WHERE id = ''00000000-0000-4000-8007-0000000000a1'''),
+ ( 3,'deal channel link',  'd3', 'UPDATE iit.deals SET source_channel_id = (SELECT id FROM iit.source_channels WHERE name = ''TEST7 Audit'') WHERE id = %1$L'),
+ ( 4,'source channel row', 'd3', 'UPDATE iit.source_channels SET route = ''hold_in_data_entry'' WHERE name = ''TEST7 Audit'''),
+ ( 5,'required-fact rules','d3', 'UPDATE iit.required_fact_rules SET required = NOT required WHERE origin = ''manual_exception'' AND fact = ''closer'''),
+ ( 6,'version row',        'd3', 'UPDATE iit.deal_versions SET opened_at = opened_at - interval ''1 minute'' WHERE deal_id = %1$L AND version_no = 1'),
+ ( 7,'title',              'd3', 'UPDATE iit.deal_titles SET title_number = ''T7TN'' WHERE deal_id = %1$L'),
+ ( 8,'lien insert',        'd3', 'INSERT INTO iit.deal_liens(deal_id, position) VALUES (%1$L, ''none'')'),
+ ( 9,'lien field',         'd3', 'UPDATE iit.deal_liens SET per_diem = 7.07 WHERE deal_id = %1$L'),
+ (10,'lienholder link',    'd3', 'INSERT INTO iit.organizations(id, name) VALUES (''00000000-0000-4000-8007-0000000000e8'', ''T7 Bank''); UPDATE iit.deal_liens SET lienholder_org_id = ''00000000-0000-4000-8007-0000000000e8'' WHERE deal_id = %1$L'),
+ (11,'organization name',  'd3', 'UPDATE iit.organizations SET name = ''T7 Bank Renamed'' WHERE id = ''00000000-0000-4000-8007-0000000000e8'''),
+ (12,'seller party',       'd3', 'UPDATE iit.seller_parties SET city = ''Waco'' WHERE id = ''00000000-0000-4000-8007-0000000000b1'''),
+ (13,'party link',         'd3', 'UPDATE iit.deal_parties SET ordinal = 2 WHERE deal_id = %1$L'),
+ (14,'consignment',        'd5', 'UPDATE iit.consignments SET notes = ''T7 note changed'' WHERE deal_id = %3$L'),
+ (15,'flag insert',        'd3', 'INSERT INTO iit.intake_flags(id, deal_id, code) VALUES (''00000000-0000-4000-8007-0000000000e9'', %1$L, ''t7_flag'')'),
+ (16,'flag field',         'd3', 'UPDATE iit.intake_flags SET detail = ''changed'' WHERE id = ''00000000-0000-4000-8007-0000000000e9'''),
+ (17,'flag status',        'd3', 'UPDATE iit.intake_flags SET status = ''resolved'', resolved_at = now(), resolution = ''x'' WHERE id = ''00000000-0000-4000-8007-0000000000e9'''),
+ (18,'hold insert',        'd3', 'INSERT INTO iit.audit_holds(id, deal_id, cause, opened_by) VALUES (''00000000-0000-4000-8007-0000000000ea'', %1$L, ''reaudit_request'', ''00000000-0000-4000-8007-000000000001'')'),
+ (19,'hold field',         'd3', 'UPDATE iit.audit_holds SET covers_version_no = 1 WHERE id = ''00000000-0000-4000-8007-0000000000ea'''),
+ (20,'requirement insert', 'd3', 'INSERT INTO iit.deal_report_requirements(deal_id, version_no, requirement_key, report_type, subject_type, subject_vin, freshness_baseline) VALUES (%1$L, 1, ''CARFAX:T7VIN00000000000A1'', ''CARFAX'', ''vehicle'', ''T7VIN00000000000A1'', now() - interval ''1 day'')'),
+ (21,'requirement field',  'd3', 'UPDATE iit.deal_report_requirements SET freshness_baseline = now() - interval ''2 days'' WHERE deal_id = %1$L'),
+ (22,'report insert',      'd3', 'INSERT INTO iit.external_vehicle_reports(id, deal_id, subject_type, vehicle_id, report_type, acquisition, pulled_at) VALUES (''00000000-0000-4000-8007-0000000000eb'', %1$L, ''vehicle'', ''00000000-0000-4000-8007-0000000000a1'', ''CARFAX'', ''manual_upload'', now())'),
+ (23,'report file',        'd3', 'UPDATE iit.external_vehicle_reports SET file_recorded_at = now(), file_bytes = 7, file_sha256 = ''ab'' WHERE id = ''00000000-0000-4000-8007-0000000000eb'''),
+ (24,'validation',         'd3', 'INSERT INTO iit.report_validations(report_id, requirement_key, deal_id, version_no, outcome, checks, validated_by) VALUES (''00000000-0000-4000-8007-0000000000eb'', ''CARFAX:T7VIN00000000000A1'', %1$L, 1, ''valid'', ''{}'', ''00000000-0000-4000-8007-000000000001'')'),
+ (25,'waiver',             'd3', 'INSERT INTO iit.report_waivers(id, deal_id, version_no, requirement_key, waived_by, reason) VALUES (''00000000-0000-4000-8007-0000000000ec'', %1$L, 1, ''CARFAX:T7VIN00000000000A1'', ''00000000-0000-4000-8007-000000000003'', ''T7 waiver'')'),
+ (26,'waiver revocation',  'd3', 'INSERT INTO iit.report_waiver_revocations(waiver_id, revoked_by, reason) VALUES (''00000000-0000-4000-8007-0000000000ec'', ''00000000-0000-4000-8007-000000000003'', ''T7 revoked'')'),
+ (27,'work item field',    'd3', 'UPDATE iit.work_items SET due_at = now() + interval ''1 day'' WHERE id = ''00000000-0000-4000-8007-0000000000c2'''),
+ (28,'material correction','d3', 'INSERT INTO iit.material_corrections(deal_id, from_version_no, draft_version_no, fields, history_ids, by) VALUES (%1$L, 1, 2, ARRAY[''title_number''], ARRAY[1]::bigint[], ''00000000-0000-4000-8007-000000000001'')'),
+ (29,'amendment',          'd3', 'INSERT INTO iit.deal_amendments(deal_id, version_no, amendment_no, field, after, by, reason) VALUES (%1$L, 1, 77, ''dealer_sold_to'', ''"x"'', ''00000000-0000-4000-8007-000000000001'', ''T7 amend'')'),
+ (30,'activity append',    'd3', 'INSERT INTO iit.activity_events(deal_id, entity_type, entity_id, action, actor_id, actor_kind, source) VALUES (%1$L, ''deal'', %1$L, ''t7_event'', ''00000000-0000-4000-8007-000000000001'', ''user'', ''t7'')'),
+ (31,'staff display name', 'd3', 'UPDATE iit.users SET display_name = ''T7 Data Entry Renamed'' WHERE id = ''00000000-0000-4000-8007-000000000001'''),
+ (32,'attempt row',        'd1', 'UPDATE iit.prequalification_checks SET opened_by = ''00000000-0000-4000-8007-000000000002'' WHERE id = iit.current_attempt(%2$L)'),
+ (33,'decision append',    'd1', 'INSERT INTO iit.audit_decisions(check_id, decision, decided_by, comments) VALUES (iit.current_attempt(%2$L), ''pending'', ''00000000-0000-4000-8007-000000000001'', ''T7 note'')'),
+ (34,'gate action row',    'd1', 'UPDATE iit.gated_actions SET outcome_reported_at = now() WHERE id = ''00000000-0000-4000-8007-0000000000f2''');
+DO $$ DECLARE c record; d3 uuid := '00000000-0000-4000-8007-0000000000d3'; d1 uuid := '00000000-0000-4000-8007-0000000000d1'; d5 uuid := '00000000-0000-4000-8007-0000000000d5';
+  t0 text; t text; tgt uuid; at0 text; BEGIN
+  -- stable under repeated reads, read-audit rows (get_deal writes one each call) and changes to another deal
+  t0 := iit._deal_state_token(d3);
+  IF iit.get_deal(d3, NULL, 'b44-7-de') ->> 'state_token' <> t0 OR iit.get_deal(d3, NULL, 'b44-7-de') ->> 'state_token' <> t0 THEN RAISE EXCEPTION 'R13a repeated reads changed the token'; END IF;
+  INSERT INTO iit.read_access_audit(actor_user_id, rpc, category, target_type, target_id, outcome) VALUES ('00000000-0000-4000-8007-000000000001', 'get_deal', 'deal_detail', 'deal', d3, 'granted');
+  UPDATE iit.deals SET dealer_sold_to = 'T7 elsewhere' WHERE id = '00000000-0000-4000-8007-0000000000d4';
+  IF iit._deal_state_token(d3) <> t0 OR iit.get_deal(d3, NULL, 'b44-7-de') ->> 'state_token' <> t0 THEN RAISE EXCEPTION 'R13b read audit or another deal changed the token'; END IF;
+  -- every covered category, one change at a time
+  FOR c IN SELECT * FROM t7_token_cases ORDER BY n LOOP
+    tgt := CASE c.deal WHEN 'd3' THEN d3 WHEN 'd1' THEN d1 ELSE d5 END;
+    t := iit._deal_state_token(tgt);
+    EXECUTE format(c.stmt, d3, d1, d5);
+    IF iit._deal_state_token(tgt) = t THEN RAISE EXCEPTION 'R13c token unchanged after: % (%)', c.label, c.n; END IF;
+  END LOOP;
+  -- get_deal returns the helper's token; the unknown-outcome token follows its work items and its deal
+  IF iit.get_deal(d3, NULL, 'b44-7-de') ->> 'state_token' <> iit._deal_state_token(d3) THEN RAISE EXCEPTION 'R13d'; END IF;
+  at0 := iit.get_unknown_outcome('00000000-0000-4000-8007-0000000000f1', 'b44-7-de') ->> 'state_token';
+  IF iit.get_unknown_outcome('00000000-0000-4000-8007-0000000000f1', 'b44-7-de') ->> 'state_token' <> at0 THEN RAISE EXCEPTION 'R13e action token unstable'; END IF;
+  -- a gate work item without a deal: only the action token's own work-item category can see it
+  INSERT INTO iit.work_items(id, kind, gated_action_id, assigned_role) VALUES ('00000000-0000-4000-8007-0000000000ed', 'gate_conflicting_reports', '00000000-0000-4000-8007-0000000000f1', 'data_entry');
+  IF iit.get_unknown_outcome('00000000-0000-4000-8007-0000000000f1', 'b44-7-de') ->> 'state_token' = at0 THEN RAISE EXCEPTION 'R13f action token missed a linked work item'; END IF;
+  at0 := iit._action_state_token('00000000-0000-4000-8007-0000000000f1');
+  UPDATE iit.work_items SET due_at = now() + interval '2 days' WHERE id = '00000000-0000-4000-8007-0000000000ed';
+  IF iit._action_state_token('00000000-0000-4000-8007-0000000000f1') = at0 THEN RAISE EXCEPTION 'R13f2 action token missed a work item field'; END IF;
+  at0 := iit._action_state_token('00000000-0000-4000-8007-0000000000f1');
+  UPDATE iit.deals SET dealer_sold_to = 'T7 changed' WHERE id = d1;
+  IF iit._action_state_token('00000000-0000-4000-8007-0000000000f1') = at0 THEN RAISE EXCEPTION 'R13g action token missed its deal'; END IF;
+END $$;
+ROLLBACK;
 
 SELECT 'ALL 007 TESTS PASS' AS result;
