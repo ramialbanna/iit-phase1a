@@ -1,4 +1,4 @@
--- deploy_executor_test.sql — run_local.sh applies 001–006 to a fresh, test-free database as `deployer` (LOGIN, CREATEROLE, not
+-- deploy_executor_test.sql — run_local.sh applies every migration to a fresh, test-free database as `deployer` (LOGIN, CREATEROLE, not
 -- superuser — the shape of Supabase's `postgres`) and then runs this as superuser. Proves the executor holds iit_owner with SET
 -- only, that nothing else was granted, and that the install left PUBLIC/anon/authenticated/service_role and D-36/D-40 untouched.
 \set ON_ERROR_STOP on
@@ -63,8 +63,9 @@ DO $$ DECLARE bad text; BEGIN
      WHERE n.nspname='iit' AND (a.grantee = 0 OR g.rolname IN ('anon','authenticated','service_role'))
     UNION ALL
     SELECT 'default ACL -> ' || coalesce(g.rolname, 'PUBLIC') || ' ' || a.privilege_type
-      FROM pg_default_acl d JOIN pg_namespace n ON n.oid=d.defaclnamespace, aclexplode(d.defaclacl) a LEFT JOIN pg_roles g ON g.oid = a.grantee
-     WHERE n.nspname='iit' AND (a.grantee = 0 OR g.rolname IN ('anon','authenticated','service_role'))
+      FROM pg_default_acl d LEFT JOIN pg_namespace n ON n.oid=d.defaclnamespace, aclexplode(d.defaclacl) a LEFT JOIN pg_roles g ON g.oid = a.grantee
+     -- global rows (defaclnamespace = 0, V-2 / 007) included: they govern iit objects too
+     WHERE (n.nspname='iit' OR d.defaclnamespace = 0) AND (a.grantee = 0 OR g.rolname IN ('anon','authenticated','service_role'))
   ) s;
   IF bad IS NOT NULL THEN RAISE EXCEPTION 'X5 public/API roles hold iit privileges: %', bad; END IF;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('anon','authenticated','service_role') AND (rolcanlogin OR rolsuper OR rolbypassrls OR rolcreaterole))
