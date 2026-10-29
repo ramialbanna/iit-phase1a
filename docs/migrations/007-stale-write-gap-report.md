@@ -1,6 +1,6 @@
 # Migration 007 — stale-write gap report (Base44 mutation adapters → IIT write functions)
 
-Status: **rev 2, 29 Oct 2026, for owner and Codex review** (rev 2: token coverage reference, Codex PR #15 P2). Owner decision F: 007 does not change any of the 27 write
+Status: **rev 2, 29 Oct 2026, for owner and Codex review** (rev 2: token coverage reference, Codex PR #15 P2). **Implemented by Migration 009** (`docs/migrations/009.md`): all G, P and E rows now require `p_expected_state`; admin writes and `create_manual_deal` are classified state-independent there; U rows still have no write path. Owner decision F: 007 does not change any of the 27 write
 signatures; **before Base44 is connected to production, every state-dependent mutation must require an authoritative
 expected-state token, with omission refused, or have equivalent database-enforced protection.** This is a mandatory
 pre-connection gate, not optional future work. Nothing in this report is implemented yet.

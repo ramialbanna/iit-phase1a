@@ -37,6 +37,8 @@ Exactly the functions whose EXECUTE 001–005 grant to `iit_integration`; migrat
 
 **Explicitly NOT in the manifest** (and denied to the role by test): all helpers (`row_actionable`, `open_hold`, `create_audit_attempt`, `build_deal_snapshot`, `actor_push`, `require_role`, `_…`), the Worker functions (`authorize_and_consume`, `report_action_outcome`, `expire_stale_attempts`, `ingest_vauto_observation`), every table and sequence.
 
+**Migration 009 (expected-state tokens):** 22 of the write signatures above gain `p_expected_state text` immediately before `p_actor_base44_user_id`, and the listed signatures no longer exist; `set_staff_identity`, `set_staff_role`, `deactivate_staff`, `create_manual_deal` and `authorize_report_access` are unchanged. Exact list, codes (`STALE_STATE` → HTTP 409) and token sources: `docs/migrations/009.md`.
+
 ## 2. What the initial screens need
 **Writes — Data Entry screens:** `create_manual_deal`, `set_deal_fact`, `set_seller_party`, `set_consignment`, `set_source_channel`, `begin/finish_report_upload`, `validate_report`, `resolve_flag`, `release_deal`, `correct_field`, `correct_party`, `amend_field`, `amend_party`, `resolve_work_item`, `resolve_restart`, `resolve_unknown_outcome`, `cancel_deal`, `authorize_report_access`.
 **Writes — Risk Audit screens:** `record_decision`, `request_reaudit`, `waive_report`, `revoke_waiver`, `rebind_hold`, `authorize_report_access`.
