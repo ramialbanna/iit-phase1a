@@ -14,8 +14,12 @@ deployed.
 - One psql session through the session pooler as `postgres`, password at psql's hidden prompt; exit 0.
 - `BEGIN TRANSACTION READ ONLY` → `transaction_read_only = on` (start and end) → `ROLLBACK`. No `COMMIT`.
 - Catalog reads, `pg_has_role`/`has_*_privilege` checks, row counts and stable-content MD5s of `iit` tables (no values
-  printed), and the exact Phase B `s2test` catalog queries. `SET LOCAL ROLE iit_owner` only around the row-count section:
-  the executor correctly holds `iit_owner` with SET only and cannot read `iit` tables otherwise. No `iit`/`s2test` function
+  printed), and the exact Phase B `s2test` catalog queries. `SET LOCAL ROLE iit_owner` only around the row-count section,
+  where the same script also runs against the local reference: the executor holds `iit_owner` with SET only (no inherited
+  owner privileges). *Corrected 29 Oct 2026 (V-3):* this section originally said the executor "cannot read `iit` tables
+  otherwise". That holds for the local non-superuser test deployer, which has no inherited `iit` table access; the live
+  Supabase `postgres` executor **can** read every `iit` table through its membership in the platform-managed
+  `pg_read_all_data` role (`docs/preflight/migration-007-application-2026-10-29.md` §5). No `iit`/`s2test` function
   was called, no RPC or migration test was run, no `s2test` row was read.
 - Remote output: 455 lines, SHA-256 `990bc4e74f435172da52c47580858ce56696d9e45f391c162bda65d1cb0ea78f` (not committed).
 - Executor/bootstrap names normalized (`postgres`/`deployer` → `<executor>`; `supabase_admin`/local bootstrap →
@@ -76,6 +80,13 @@ added for it; the direct IIT graph is exactly as designed. It is inherent to gra
 - A platform-managed database role holding an arbitrary SQL session is **outside the application credential boundary**:
   the D-48 credential controls what a PostgREST caller holding an `iit_base44` token can do; they do not, and are
   not claimed to, constrain Supabase's own service roles.
+
+### V-3 (added 29 Oct 2026) — platform-managed roles read `iit` tables through `pg_read_all_data`
+
+Measured after Migration 007: `postgres`, `supabase_etl_admin` and `supabase_read_only_user` hold SELECT on every `iit` table
+through Supabase-managed membership in `pg_read_all_data`, although `iit` ACLs are owner-only. Accepted for Phase 1 as a
+platform trust boundary; IIT's application boundary (no direct table privileges for application roles, RPC-only access,
+mandatory credential and staff checks) is unchanged. Full record: `docs/preflight/migration-007-application-2026-10-29.md` §5.
 
 ### V-2 — the per-schema default function-privilege revoke is ineffective; correct it before any new IIT function
 
